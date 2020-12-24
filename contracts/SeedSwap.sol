@@ -1,0 +1,497 @@
+pragma solidity 0.5.11;
+
+import "./ISeedSwap.sol";
+import "./whitelist/WhitelistExtension.sol";
+import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/crowdsale/distribution/FinalizableCrowdsale.sol";
+
+
+/// @dev SeedSwap contract for presale TEA token
+/// Some notations:
+/// dAmount - distributed token amount
+/// uAmount - undistributed token amount
+/// tAmount - token amount
+/// eAmount - eth amount
+contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    using SafeMath for uint256;
+    using SafeMath for uint128;
+
+    IERC20  public constant ETH_ADDRESS = IERC20(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
+    // TODO: Change to constant
+    uint256 public HARD_CAP = 300 ether;
+    uint256 public MIN_INDIVIDUAL_CAP = 1 ether;
+    uint256 public MAX_INDIVIDUAL_CAP = 5 ether;
+    // user can call to distribute tokens after WITHDRAWAL_DEADLINE + saleEndTime
+    uint256 public WITHDRAWAL_DEADLINE = 180 days;
+    uint256 public SAFE_DISTRIBUTE_NUMBER = 150; // safe to distribute to 150 users at once
+
+    IERC20 public saleToken;
+    uint256 public saleStartTime = 1609729200;// 10:00, 4 Jan 2021 GMT+7
+    uint256 public saleEndTime = 1610298000;// 24:00, 11 Jan 2021 GMT+7
+    uint256 public saleRate = 20000; // 1 eth = 20,000 token
+
+    // address to receive eth of presale, default owner
+    address payable public ethRecipient;
+    // total eth and token amounts that all users have swapped
+    uint256 public totalSwappedEth = 0;
+    uint256 public totalSwappedToken = 0;
+    uint256 public totalDistributedToken = 0;
+
+    struct SwapData {
+        address user;
+        uint128 eAmount; // eth amount
+        uint128 tAmount; // token amount
+        uint128 dAmount; // distributed amount of this order
+        uint128 timestamp;
+    }
+
+    // all swaps that are made by users
+    SwapData[] listSwaps;
+
+    struct UserSwapData {
+        uint128 eAmount;
+        uint128 tAmount;
+        uint128 dAmount;
+        uint256[] ids; // indices in the listSwaps
+    }
+
+    // data of each user
+    mapping(address => UserSwapData) userSwapData;
+
+    event SwappedEthToTea(
+        address indexed trader,
+        uint256 indexed ethAmount,
+        uint256 indexed teaAmount,
+        uint256 blockTimestamp
+    );
+    event UpdateSaleTimes(
+        uint256 indexed newStartTime,
+        uint256 newEndTime
+    );
+    event UpdateSaleRate(uint256 indexed newSaleRate);
+    event UpdateEthRecipient(address indexed newRecipient);
+    event Distributed(
+        address indexed user,
+        uint256 dAmount,
+        uint256 indexed percentage,
+        uint256 indexed timestamp
+    );
+    event EmergencyUserWithdrawToken(
+        address indexed sender,
+        uint256 indexed dAmount,
+        uint256 timestamp
+    );
+    event EmergencyOwnerWithdraw(
+        address indexed sender,
+        IERC20 indexed token,
+        uint256 amount
+    );
+
+    modifier onlyNotStarted() {
+        require(block.timestamp < saleStartTime, "onlyNotStarted: already started");
+        _;
+    }
+
+    modifier onlyNotEnded() {
+        require(block.timestamp <= saleEndTime, "onlyNotEnded: already ended");
+        _;
+    }
+
+    modifier onlyValidPercentage(uint256 percentage) {
+        require(0 < percentage && percentage <= 100, "onlyValidPercentage: out of range");
+        _;
+    }
+
+    /// @dev Conditions:
+    /// 1. sale must be in progress
+    /// 2. hard cap is not reached yet
+    /// 3. user's swap eth amount is within individual caps
+    /// 4. user is whitelisted
+    /// 5. total user's eth amount is not higher than max user's cap
+    /// 6. if total eth amount after the swap is higher than hard cap,
+    ///     still allow user to swap if enough token balance
+    /// Note: _paused is checked independently.
+    modifier onlyCanSwap(uint256 ethAmount) {
+        require(ethAmount > 0, "onlyCanSwap: amount is 0");
+        // check sale is in progress
+        require(block.timestamp >= saleStartTime, "onlyCanSwap: not started yet");
+        require(block.timestamp <= saleEndTime, "onlyCanSwap: already ended");
+        // check hardcap is not reached
+        require(totalSwappedEth < HARD_CAP, "onlyCanSwap: HARD_CAP reached");
+        // check individual cap
+        require(
+            ethAmount >= MIN_INDIVIDUAL_CAP && ethAmount <= MAX_INDIVIDUAL_CAP,
+            "onlyCanSwap: eth amount must be within individual cap"
+        );
+        address sender = msg.sender;
+        // check whitelisted
+        require(isWhitelisted(sender), "onlyCanSwap: sender is not whitelisted");
+        // check total user's swap eth amount <= max individual cap
+        // note: no overflow here as amount has been checked within user's caps
+        require(
+            ethAmount + userSwapData[sender].eAmount <= MAX_INDIVIDUAL_CAP,
+            "capSwap: max individual cap reached"
+        );
+        // only check token balance is enough to swap if hard cap is reached after this swap
+        if (ethAmount + totalSwappedEth > HARD_CAP) {
+            uint256 tokenAmount = _getTokenAmount(ethAmount);
+            require(
+                tokenAmount.add(totalSwappedToken) <= saleToken.balanceOf(address(this)),
+                "capSwap: not enough token to swap"
+            );
+        }
+        _;
+    }
+
+    constructor(address payable _owner, IERC20 _token) public {
+        require(_token != IERC20(0), "constructor: invalid token");
+        // (safe) check timestamp
+        require(block.timestamp < saleStartTime, "constructor: invalid start time");
+        require(saleStartTime < saleEndTime, "constructor: invalid start and end time");
+
+        saleToken = _token;
+        ethRecipient = _owner;
+
+        // add owner as whitelisted admin and transfer ownership if needed
+        if (msg.sender != _owner) {
+            _addWhitelistAdmin(_owner);
+            transferOwnership(_owner);
+        }
+
+        // simple data
+        saleStartTime = block.timestamp;
+        saleEndTime = saleStartTime + 12 hours; // end after 12 hours
+        HARD_CAP = 5 * 10**18;
+        MIN_INDIVIDUAL_CAP = 10**16;
+        MAX_INDIVIDUAL_CAP = 10**18;
+    }
+
+    function () external payable {
+        swapEthToToken();
+    }
+
+    /// ================ UPDATE DEFAULT DATA ====================
+
+    /// @dev the owner can update start and end times when it is not yet started
+    function updateSaleTimes(uint256 _newStartTime, uint256 _newEndTime)
+        external onlyNotStarted onlyOwner
+    {
+        require(_newStartTime < _newEndTime, "Times: invalid start and end time");
+        require(block.timestamp < _newStartTime, "Times: invalid start time");
+        saleStartTime = _newStartTime;
+        saleEndTime = _newEndTime;
+        emit UpdateSaleTimes(_newStartTime, _newEndTime);
+    }
+
+    /// @dev the owner can update the sale rate whenever the sale is not ended yet
+    function updateSaleRate(uint256 _newsaleRate)
+        external onlyNotEnded onlyOwner
+    {
+        // safe check rate not different more than 50% than the current rate
+        require(_newsaleRate >= saleRate / 2, "Rates: new rate too low");
+        require(_newsaleRate <= saleRate * 3 / 2, "Rates: new rate too high");
+
+        saleRate = _newsaleRate;
+        emit UpdateSaleRate(_newsaleRate);
+    }
+
+    /// @dev the owner can update the recipient of eth any time
+    function updateEthRecipientAddress(address payable _newRecipient)
+        external onlyOwner
+    {
+        require(_newRecipient != address(0), "Receipient: invalid eth recipient address");
+        ethRecipient = _newRecipient;
+        emit UpdateEthRecipient(_newRecipient);
+    }
+
+    /// ================ SWAP ETH TO TEA TOKEN ====================
+    /// @dev user can call this function to swap eth to TEA token
+    /// or just deposit eth directly to the contract
+    function swapEthToToken()
+        public payable
+        nonReentrant
+        whenNotPaused
+        onlyCanSwap(msg.value)
+        returns (uint256 tokenAmount)
+    {
+        address sender = msg.sender;
+        uint256 ethAmount = msg.value;
+        tokenAmount = _getTokenAmount(ethAmount);
+
+        // record new swap
+        SwapData memory _swapData = SwapData({
+            user: sender,
+            eAmount: uint128(ethAmount),
+            tAmount: uint128(tokenAmount),
+            dAmount: uint128(0),
+            timestamp: uint128(block.timestamp)
+        });
+        listSwaps.push(_swapData);
+        // update user swap data
+        userSwapData[sender].eAmount += uint128(ethAmount);
+        userSwapData[sender].tAmount += uint128(tokenAmount);
+        userSwapData[sender].ids.push(listSwaps.length - 1);
+
+        // update total swap eth and token amounts
+        totalSwappedEth += msg.value;
+        totalSwappedToken += tokenAmount;
+
+        // transfer eth to recipient
+        ethRecipient.transfer(msg.value);
+
+        emit SwappedEthToTea(sender, ethAmount, tokenAmount, block.timestamp);
+    }
+
+    /// ================ DISTRIBUTE TOKENS ====================
+
+    /// @dev admin can call this function to perform distribute to all eligible swaps
+    /// @param percentage percentage of undistributed amount will be distributed
+    /// @param daysBefore only distributed to swaps that were made before X days from now
+    function distributeAll(uint256 percentage, uint256 daysBefore)
+        external onlyWhitelistAdmin whenNotPaused onlyValidPercentage(percentage)
+        returns (uint256 totalAmount)
+    {
+        uint256 timestamp = block.timestamp.sub(daysBefore * 1 days);
+        for(uint256 i = 0; i < listSwaps.length; i++) {
+            SwapData memory data = listSwaps[i];
+            if (data.timestamp <= timestamp) {
+                totalAmount += _distributedToken(i, percentage);
+            }
+        }
+        totalDistributedToken = totalDistributedToken.add(totalAmount);
+    }
+
+    /// @dev admin can also use this function to distribute by batch, in case distributeAll can be out of gas
+    /// @param percentage percentage of undistributed amount will be distributed
+    /// @param ids list of ids in the listSwaps to be distributed
+    function distributeBatch(uint256 percentage, uint256[] calldata ids)
+        external onlyWhitelistAdmin whenNotPaused onlyValidPercentage(percentage)
+        returns (uint256 totalAmount)
+    {
+        for(uint256 i = 0; i < ids.length; i++) {
+            require(ids[i] < listSwaps.length, "Distribute: invalid id");
+            // safe prevent duplicated ids in 1 batch
+            if (i > 0) require(ids[i] > ids[i - 1], "Distribute: duplicated ids");
+            totalAmount += _distributedToken(ids[i], percentage);
+        }
+        totalDistributedToken = totalDistributedToken.add(totalAmount);
+    }
+
+    /// ================ EMERGENCY FOR USER AND OWNER ====================
+
+    /// @dev in case after WITHDRAWAL_DEADLINE from end sale time
+    /// user can call this function to claim all of their tokens
+    /// also update user's swap records
+    function emergencyUserWithdrawToken() external returns (uint256 tokenAmount) {
+        require(
+            block.timestamp > WITHDRAWAL_DEADLINE + saleEndTime,
+            "Emergency: not open for emergency withdrawal"
+        );
+        address sender = msg.sender;
+        tokenAmount = userSwapData[sender].tAmount.sub(userSwapData[sender].dAmount);
+        require(tokenAmount > 0, "Emergency: user has claimed all tokens");
+        require(
+            tokenAmount <= saleToken.balanceOf(address(this)),
+            "Emergency: not enough token to distribute"
+        );
+
+        userSwapData[sender].dAmount = userSwapData[sender].tAmount;
+        // update each user's record
+        for(uint256 i = 0; i < userSwapData[sender].ids.length; i++) {
+            uint256 id = userSwapData[sender].ids[i];
+            // safe check
+            assert(listSwaps[id].user == sender);
+            // update distributed amount for each swap data
+            listSwaps[id].dAmount = listSwaps[id].tAmount;
+        }
+        totalDistributedToken = totalDistributedToken.add(tokenAmount);
+        // transfer token to user
+        saleToken.safeTransfer(sender, tokenAmount);
+        emit EmergencyUserWithdrawToken(sender, tokenAmount, block.timestamp);
+    }
+
+    /// @dev emergency to allow owner withdraw eth or tokens inside the contract
+    /// in case anything happens
+    function emergencyOwnerWithdraw(IERC20 token, uint256 amount) external onlyOwner {
+        if (token == ETH_ADDRESS) {
+            msg.sender.transfer(amount);
+        } else {
+            token.safeTransfer(msg.sender, amount);
+        }
+        emit EmergencyOwnerWithdraw(msg.sender, token, amount);
+    }
+
+    /// ================ GETTERS ====================
+
+    /// @dev return full details data of a user
+    function getUserSwapData(address user)
+        external view 
+        returns (
+            uint256 totalEthAmount,
+            uint128 totalTokenAmount,
+            uint128 distributedAmount,
+            uint128 remainingAmount,
+            uint128[] memory ethAmounts,
+            uint128[] memory tokenAmounts,
+            uint128[] memory distributedAmounts,
+            uint128[] memory timestamps
+        )
+    {
+        totalEthAmount = userSwapData[user].eAmount;
+        totalTokenAmount = userSwapData[user].tAmount;
+        distributedAmount = userSwapData[user].dAmount;
+        remainingAmount = totalTokenAmount - distributedAmount;
+
+        // record of all user's swaps
+        uint256[] memory swapDataIDs = userSwapData[user].ids;
+        ethAmounts = new uint128[](swapDataIDs.length);
+        tokenAmounts = new uint128[](swapDataIDs.length);
+        distributedAmounts = new uint128[](swapDataIDs.length);
+        timestamps = new uint128[](swapDataIDs.length);
+
+        for(uint256 i = 0; i < swapDataIDs.length; i++) {
+            ethAmounts[i] = listSwaps[swapDataIDs[i]].eAmount;
+            tokenAmounts[i] = listSwaps[swapDataIDs[i]].tAmount;
+            distributedAmounts[i] = listSwaps[swapDataIDs[i]].dAmount;
+            timestamps[i] = listSwaps[swapDataIDs[i]].timestamp;
+        }
+    }
+
+    /// @dev returns list of users and distributed amounts if user calls distributeAll function
+    /// in case anything is wrong, it will revert
+    function estimateDistributedAllData(
+        uint128 percentage,
+        uint256 daysBefore
+    )
+        external view
+        whenNotPaused
+        onlyValidPercentage(percentage)
+        returns(
+            bool isSafe,
+            uint256 totalUsers,
+            uint256 totalDistributingAmount,
+            uint256[] memory ids,
+            address[] memory users,
+            uint128[] memory distributingAmounts
+        )
+    {
+        require(block.timestamp > saleEndTime, "Estimate: sale is not ended");
+        // only distribute to orders that before this timestamp
+        uint256 timestamp = block.timestamp.sub(daysBefore * 1 days);
+
+        // count number of data that can be distributed
+        totalUsers = 0;
+        for(uint256 i = 0; i < listSwaps.length; i++) {
+            if (listSwaps[i].timestamp > timestamp) break;
+            // has undistributed amount
+            if (listSwaps[i].tAmount > listSwaps[i].dAmount) totalUsers += 1;
+        }
+
+        // return data that will be used to distribute
+        ids = new uint256[](totalUsers);
+        users = new address[](totalUsers);
+        distributingAmounts = new uint128[](totalUsers);
+
+        uint256 counter = 0;
+        for(uint256 i = 0; i < listSwaps.length; i++) {
+            SwapData memory data = listSwaps[i];
+            if (listSwaps[i].timestamp > timestamp) break;
+            if (listSwaps[i].tAmount <= listSwaps[i].dAmount) continue;
+            counter += 1;
+            ids[counter] = i;
+            users[counter] = data.user;
+            // don't need to use SafeMath here
+            distributingAmounts[counter] = (data.tAmount - data.dAmount) * percentage / 100;
+            totalDistributingAmount += distributingAmounts[counter];
+        }
+        require(
+            totalDistributingAmount <= saleToken.balanceOf(address(this)),
+            "Estimate: not enought token balance"
+        );
+        isSafe = totalUsers <= SAFE_DISTRIBUTE_NUMBER;
+    }
+
+    /// @dev returns list of users and distributed amounts if user calls distributeBatch function
+    /// in case anything is wrong, it will revert
+    function estimateDistributedBatchData(
+        uint128 percentage,
+        uint256[] calldata ids
+    )
+        external view
+        whenNotPaused
+        onlyValidPercentage(percentage)
+        returns(
+            bool isSafe,
+            uint256 totalUsers,
+            uint256 totalDistributingAmount,
+            uint256[] memory selectedIds,
+            address[] memory users,
+            uint128[] memory distributingAmounts
+        )
+    {
+        require(block.timestamp > saleEndTime, "Estimate: sale is not ended");
+
+        totalUsers = 0;
+        for(uint256 i = 0; i < ids.length; i++) {
+            require(ids[i] < listSwaps.length, "Estimate: id out of range");
+            if (i > 0) require(ids[i] > ids[i - 1], "Estimate: duplicated ids");
+            // has undistributed amount
+            if (listSwaps[i].tAmount > listSwaps[i].dAmount) totalUsers += 1;
+        }
+        // return data that will be used to distribute
+        selectedIds = new uint256[](totalUsers);
+        users = new address[](totalUsers);
+        distributingAmounts = new uint128[](totalUsers);
+        uint256 counter = 0;
+        for(uint256 i = 0; i < ids.length; i++) {
+            if (listSwaps[i].tAmount <= listSwaps[i].dAmount) continue;
+            SwapData memory data = listSwaps[ids[i]];
+            counter += 1;
+            selectedIds[counter] = ids[i];
+            users[counter] = data.user;
+            // don't need to use SafeMath here
+            distributingAmounts[counter] = (data.tAmount - data.dAmount) * percentage / 100;
+            totalDistributingAmount += distributingAmounts[counter];
+        }
+        require(
+            totalDistributingAmount <= saleToken.balanceOf(address(this)),
+            "Estimate: not enought token balance"
+        );
+        isSafe = totalUsers <= SAFE_DISTRIBUTE_NUMBER;
+    }
+
+    /// @dev calculate amount token to distribute and send to user
+    function _distributedToken(uint256 id, uint256 percentage)
+        internal
+        returns (uint256 distributingAmount)
+    {
+        SwapData memory data = listSwaps[id];
+        uint256 uAmount = uint256(data.tAmount.sub(data.dAmount));
+        distributingAmount = uAmount.mul(percentage).div(100);
+        if (distributingAmount == 0) return 0; // no action if distributingAmount == 0
+        require(
+            distributingAmount <= saleToken.balanceOf(address(this)),
+            "Distribute: not enough token to distribute"
+        );
+        // no overflow, so don't need to use SafeMath here
+        listSwaps[id].dAmount += uint128(distributingAmount);
+        // by right, user's undistributed amount should be <= distributing amount
+        assert(
+            userSwapData[data.user].tAmount.sub(userSwapData[data.user].dAmount) >= uint128(distributingAmount)
+        );
+        // increase distributed amount for user, no overflow, so don't need to use SafeMath here
+        userSwapData[data.user].dAmount += uint128(distributingAmount);
+        // send token to user's wallet
+        saleToken.safeTransfer(data.user, distributingAmount);
+        emit Distributed(data.user, distributingAmount, percentage, block.timestamp);
+    }
+
+    /// @dev return received tokenAmount given ethAmount
+    /// note that token decimals is 18
+    function _getTokenAmount(uint256 ethAmount) internal view returns (uint256) {
+        return ethAmount.mul(saleRate);
+    }
+}
