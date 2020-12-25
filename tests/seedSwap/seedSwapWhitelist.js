@@ -4,8 +4,7 @@ const SeedSwap = artifacts.require('SeedSwap.sol');
 const BN = web3.utils.BN;
 
 const Helper = require('../helper');
-const { ethAddress, zeroAddress, ethDecimals, precisionUnits} = require('../helper');
-const {expectRevert, expectEvent} = require('@openzeppelin/test-helpers');
+const {expectRevert} = require('@openzeppelin/test-helpers');
 
 let teaToken;
 let seedSwap;
@@ -22,7 +21,7 @@ contract('SeedSwap - Whitelist', accounts => {
       admin = accounts[1];
       owner = accounts[2];
       user = accounts[3];
-      teaToken = await TeaToken.new(admin);
+      teaToken = await TeaToken.new(owner);
       seedSwap = await SeedSwap.new(owner, teaToken.address, { from: deployer });
     });
 
@@ -123,6 +122,20 @@ contract('SeedSwap - Whitelist', accounts => {
       // tx won't revert if remove again
       await seedSwap.updateWhitelistedUsers([user, deployer], false, { from: admin });
       Helper.assertEqual(false, await seedSwap.isWhitelisted(user));
+    });
+
+    // no way to transfer eth to contract without reverting
+    it(`Test owner withdraw token`, async() => {
+      let tokenAmount = new BN(10).pow(new BN(10));
+      await teaToken.transfer(seedSwap.address, tokenAmount, { from: owner });
+      ownerBal = await teaToken.balanceOf(owner);
+      await expectRevert(
+        seedSwap.emergencyOwnerWithdraw(teaToken.address, tokenAmount, { from: user }),
+        "Ownable: caller is not the owner"
+      );
+      await seedSwap.emergencyOwnerWithdraw(teaToken.address, tokenAmount, { from: owner, gasPrice: new BN(0) });
+      newOwnerBal = await teaToken.balanceOf(owner);
+      Helper.assertEqual(tokenAmount, newOwnerBal.sub(ownerBal));
     });
   });
 });

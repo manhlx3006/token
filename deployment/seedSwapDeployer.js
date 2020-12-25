@@ -52,9 +52,9 @@ async function main() {
   // await seedSwap.updateWhitelistedUsers(addresses, true, { from: deployer, gasPrice: gasPrice });
 
   await seedSwap.swapEthToToken({ value: new BN(10).pow(new BN(16)), gasPrice: gasPrice });
-  await Helper.sendEtherWithPromise(deployer, seedSwapAddress, new BN(10).pow(new BN(16)));
-  // await Helper.sendEtherWithPromise(deployer, "0xc783df8a850f42e7f7e57013759c285caa701eb6", (new BN(5)).mul(new BN(10).pow(new BN(17))));
-  // await Helper.sendEtherWithPromise(deployer, "0xead9c93b79ae7c1591b1fb5323bd777e86e150d4", (new BN(5)).mul(new BN(10).pow(new BN(17))));
+  await Helper.transferEth(deployer, seedSwapAddress, new BN(10).pow(new BN(16)));
+  // await Helper.transferEth(deployer, "0xc783df8a850f42e7f7e57013759c285caa701eb6", (new BN(5)).mul(new BN(10).pow(new BN(17))));
+  // await Helper.transferEth(deployer, "0xead9c93b79ae7c1591b1fb5323bd777e86e150d4", (new BN(5)).mul(new BN(10).pow(new BN(17))));
 
   // const ethAmount = new BN(6).mul(new BN(10).pow(new BN(15)));
   // let tx = await seedSwap.swapEthToToken({ value: ethAmount, gasPrice: gasPrice });
@@ -64,7 +64,7 @@ async function main() {
   // console.log(`token: ${data.totalTokenAmount}`);
   // console.log(`dToken: ${data.distributedAmount}`);
   // console.log(`uToken: ${data.remainingAmount}`);
-  // await Helper.sendEtherWithPromise(deployer, seedSwap.address, ethAmount, { gasPrice: gasPrice });
+  // await Helper.transferEth(deployer, seedSwap.address, ethAmount, { gasPrice: gasPrice });
 
   // data = await seedSwap.getUserSwapData(deployer);
   // console.log(`eth: ${data.totalEthAmount}`);

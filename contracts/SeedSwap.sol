@@ -21,17 +21,18 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
 
     IERC20  public constant ETH_ADDRESS = IERC20(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     // TODO: Change to constant
-    uint256 public HARD_CAP = 300 ether;
+    uint256 public HARD_CAP = 400 ether;
     uint256 public MIN_INDIVIDUAL_CAP = 1 ether;
-    uint256 public MAX_INDIVIDUAL_CAP = 5 ether;
+    uint256 public MAX_INDIVIDUAL_CAP = 10 ether;
     // user can call to distribute tokens after WITHDRAWAL_DEADLINE + saleEndTime
     uint256 public WITHDRAWAL_DEADLINE = 180 days;
     uint256 public SAFE_DISTRIBUTE_NUMBER = 150; // safe to distribute to 150 users at once
+    uint256 public DISTRIBUTE_PERIOD_UNIT = 1 days;
 
     IERC20 public saleToken;
-    uint256 public saleStartTime = 1609729200;// 10:00, 4 Jan 2021 GMT+7
-    uint256 public saleEndTime = 1610298000;// 24:00, 11 Jan 2021 GMT+7
-    uint256 public saleRate = 20000; // 1 eth = 20,000 token
+    uint256 public saleStartTime = 1609729200;  // 10:00:00, 4 Jan 2021 GMT+7
+    uint256 public saleEndTime = 1610384340;    // 23:59:00, 11 Jan 2021 GMT+7
+    uint256 public saleRate = 20000;            // 1 eth = 20,000 token
 
     // address to receive eth of presale, default owner
     address payable public ethRecipient;
@@ -44,12 +45,12 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         address user;
         uint128 eAmount; // eth amount
         uint128 tAmount; // token amount
-        uint128 dAmount; // distributed amount of this order
+        uint128 dAmount; // distributed token amount
         uint128 timestamp;
     }
 
     // all swaps that are made by users
-    SwapData[] listSwaps;
+    SwapData[] public listSwaps;
 
     struct UserSwapData {
         uint128 eAmount;
@@ -59,7 +60,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
     }
 
     // data of each user
-    mapping(address => UserSwapData) userSwapData;
+    mapping(address => UserSwapData) public userSwapData;
 
     event SwappedEthToTea(
         address indexed trader,
@@ -90,18 +91,23 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         uint256 amount
     );
 
-    modifier onlyNotStarted() {
-        require(block.timestamp < saleStartTime, "onlyNotStarted: already started");
+    modifier whenNotStarted() {
+        require(block.timestamp < saleStartTime, "already started");
         _;
     }
 
-    modifier onlyNotEnded() {
-        require(block.timestamp <= saleEndTime, "onlyNotEnded: already ended");
+    modifier whenNotEnded() {
+        require(block.timestamp <= saleEndTime, "already ended");
+        _;
+    }
+
+    modifier whenEnded() {
+        require(block.timestamp > saleEndTime, "not ended yet");
         _;
     }
 
     modifier onlyValidPercentage(uint256 percentage) {
-        require(0 < percentage && percentage <= 100, "onlyValidPercentage: out of range");
+        require(0 < percentage && percentage <= 100, "percentage out of range");
         _;
     }
 
@@ -160,13 +166,6 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             _addWhitelistAdmin(_owner);
             transferOwnership(_owner);
         }
-
-        // simple data
-        saleStartTime = block.timestamp;
-        saleEndTime = saleStartTime + 12 hours; // end after 12 hours
-        HARD_CAP = 5 * 10**18;
-        MIN_INDIVIDUAL_CAP = 10**16;
-        MAX_INDIVIDUAL_CAP = 10**18;
     }
 
     function () external payable {
@@ -177,7 +176,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
 
     /// @dev the owner can update start and end times when it is not yet started
     function updateSaleTimes(uint256 _newStartTime, uint256 _newEndTime)
-        external onlyNotStarted onlyOwner
+        external whenNotStarted onlyOwner
     {
         require(_newStartTime < _newEndTime, "Times: invalid start and end time");
         require(block.timestamp < _newStartTime, "Times: invalid start time");
@@ -188,7 +187,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
 
     /// @dev the owner can update the sale rate whenever the sale is not ended yet
     function updateSaleRate(uint256 _newsaleRate)
-        external onlyNotEnded onlyOwner
+        external whenNotEnded onlyOwner
     {
         // safe check rate not different more than 50% than the current rate
         require(_newsaleRate >= saleRate / 2, "Rates: new rate too low");
@@ -249,12 +248,13 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
 
     /// @dev admin can call this function to perform distribute to all eligible swaps
     /// @param percentage percentage of undistributed amount will be distributed
-    /// @param daysBefore only distributed to swaps that were made before X days from now
-    function distributeAll(uint256 percentage, uint256 daysBefore)
-        external onlyWhitelistAdmin whenNotPaused onlyValidPercentage(percentage)
+    /// @param units only distribute for swaps that were made
+    ///         before units * DISTRIBUTE_PERIOD_UNIT from now
+    function distributeAll(uint256 percentage, uint256 units)
+        external onlyWhitelistAdmin whenEnded whenNotPaused onlyValidPercentage(percentage)
         returns (uint256 totalAmount)
     {
-        uint256 timestamp = block.timestamp.sub(daysBefore * 1 days);
+        uint256 timestamp = block.timestamp.sub(units * DISTRIBUTE_PERIOD_UNIT);
         for(uint256 i = 0; i < listSwaps.length; i++) {
             SwapData memory data = listSwaps[i];
             if (data.timestamp <= timestamp) {
@@ -264,17 +264,19 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         totalDistributedToken = totalDistributedToken.add(totalAmount);
     }
 
-    /// @dev admin can also use this function to distribute by batch, in case distributeAll can be out of gas
+    /// @dev admin can also use this function to distribute by batch,
+    ///      in case distributeAll can be out of gas
     /// @param percentage percentage of undistributed amount will be distributed
     /// @param ids list of ids in the listSwaps to be distributed
     function distributeBatch(uint256 percentage, uint256[] calldata ids)
-        external onlyWhitelistAdmin whenNotPaused onlyValidPercentage(percentage)
+        external onlyWhitelistAdmin whenEnded whenNotPaused onlyValidPercentage(percentage)
         returns (uint256 totalAmount)
     {
+        uint256 len = listSwaps.length;
         for(uint256 i = 0; i < ids.length; i++) {
-            require(ids[i] < listSwaps.length, "Distribute: invalid id");
+            require(ids[i] < len, "Distribute: invalid id");
             // safe prevent duplicated ids in 1 batch
-            if (i > 0) require(ids[i] > ids[i - 1], "Distribute: duplicated ids");
+            if (i > 0) require(ids[i - 1] < ids[i], "Distribute: indices are not in order");
             totalAmount += _distributedToken(ids[i], percentage);
         }
         totalDistributedToken = totalDistributedToken.add(totalAmount);
@@ -325,6 +327,36 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
     }
 
     /// ================ GETTERS ====================
+    function getNumberSwaps() external view returns (uint256) {
+        return listSwaps.length;
+    }
+
+    function getAllSwaps()
+        external view
+        returns (
+            address[] memory users,
+            uint128[] memory ethAmounts,
+            uint128[] memory tokenAmounts,
+            uint128[] memory distributedAmounts,
+            uint128[] memory timestamps
+        )
+    {
+        uint256 len = listSwaps.length;
+        users = new address[](len);
+        ethAmounts = new uint128[](len);
+        tokenAmounts = new uint128[](len);
+        distributedAmounts = new uint128[](len);
+        timestamps = new uint128[](len);
+
+        for(uint256 i = 0; i < len; i++) {
+            SwapData memory data = listSwaps[i];
+            users[i] = data.user;
+            ethAmounts[i] = data.eAmount;
+            tokenAmounts[i] = data.tAmount;
+            distributedAmounts[i] = data.dAmount;
+            timestamps[i] = data.timestamp;
+        }
+    }
 
     /// @dev return full details data of a user
     function getUserSwapData(address user)
@@ -362,9 +394,12 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
 
     /// @dev returns list of users and distributed amounts if user calls distributeAll function
     /// in case anything is wrong, it will revert
+    /// @param percentage percentage of undistributed amount will be distributed
+    /// @param units only distribute for swaps that were made
+    ///         before units * DISTRIBUTE_PERIOD_UNIT from now
     function estimateDistributedAllData(
         uint128 percentage,
-        uint256 daysBefore
+        uint256 units
     )
         external view
         whenNotPaused
@@ -380,7 +415,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
     {
         require(block.timestamp > saleEndTime, "Estimate: sale is not ended");
         // only distribute to orders that before this timestamp
-        uint256 timestamp = block.timestamp.sub(daysBefore * 1 days);
+        uint256 timestamp = block.timestamp.sub(units * DISTRIBUTE_PERIOD_UNIT);
 
         // count number of data that can be distributed
         totalUsers = 0;

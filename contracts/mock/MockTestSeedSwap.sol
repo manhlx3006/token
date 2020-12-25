@@ -17,8 +17,10 @@ contract MockTestSeedSwap is SeedSwap {
         saleEndTime = endTime;
         _addWhitelisted(msg.sender);
         HARD_CAP = hardCap;
-        MIN_INDIVIDUAL_CAP = 10;
+        MIN_INDIVIDUAL_CAP = 10**10;
         MAX_INDIVIDUAL_CAP = maxUserCap;
-        WITHDRAWAL_DEADLINE = endTime * 2;
+        WITHDRAWAL_DEADLINE = 300 seconds; // 5 mins after ended
+        DISTRIBUTE_PERIOD_UNIT = 1 seconds; // change unit to 1 second
+        SAFE_DISTRIBUTE_NUMBER = 5;
     }
 }

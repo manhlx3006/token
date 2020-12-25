@@ -144,16 +144,16 @@ module.exports = {
     }
   },
 
-  solidity: {
-    version: "0.5.11",
-    settings: {
-      optimizer: require("./solcOptimiserSettings.js")
-    }
-  },
-
   paths: {
     sources: "./contracts",
     tests: "./tests/",
+  },
+
+  solidity: {
+    version: "0.5.11",
+    settings: {
+      optimizer: require("./optimiserSettings.js")
+    }
   },
 
   mocha: {
@@ -161,8 +161,6 @@ module.exports = {
   },
 
   etherscan: {
-    // Your API key for Etherscan
-    // Obtain one at https://etherscan.io/
     apiKey: process.env.ETHERSCAN_KEY
   }
 };
@@ -171,14 +169,8 @@ const INFURA_API_KEY = process.env.INFURA_API_KEY;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
 if (INFURA_API_KEY != undefined && PRIVATE_KEY != undefined) {
-  module.exports.networks.kovan = {
-    url: `https://kovan.infura.io/v3/${INFURA_API_KEY}`,
-    accounts: [PRIVATE_KEY],
-    timeout: 20000
-  };
-
-  module.exports.networks.rinkeby = {
-    url: `https://rinkeby.infura.io/v3/${INFURA_API_KEY}`,
+  module.exports.networks.mainnet = {
+    url: `https://mainnet.infura.io/v3/${INFURA_API_KEY}`,
     accounts: [PRIVATE_KEY],
     timeout: 20000
   };
@@ -189,8 +181,14 @@ if (INFURA_API_KEY != undefined && PRIVATE_KEY != undefined) {
     timeout: 20000
   };
 
-  module.exports.networks.mainnet = {
-    url: `https://mainnet.infura.io/v3/${INFURA_API_KEY}`,
+  module.exports.networks.kovan = {
+    url: `https://kovan.infura.io/v3/${INFURA_API_KEY}`,
+    accounts: [PRIVATE_KEY],
+    timeout: 20000
+  };
+
+  module.exports.networks.rinkeby = {
+    url: `https://rinkeby.infura.io/v3/${INFURA_API_KEY}`,
     accounts: [PRIVATE_KEY],
     timeout: 20000
   };

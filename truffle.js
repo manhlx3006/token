@@ -1,6 +1,6 @@
 module.exports = {
   solc: {
-    optimizer: require("./solcOptimiserSettings.js")
+    optimizer: require("./optimiserSettings.js")
   },
   networks: {
     development: {
