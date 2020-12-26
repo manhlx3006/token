@@ -206,6 +206,7 @@ contract('SeedSwap', accounts => {
       Helper.assertEqual(first.tAmount, second.tAmount);
       Helper.assertEqual(first.dAmount, second.dAmount);
       Helper.assertEqual(first.timestamp, second.timestamp);
+      Helper.assertEqual(first.daysID, second.daysID);
     }
 
     const generateSwapObject = function(sender, eAmount, tAmount) {
@@ -214,7 +215,8 @@ contract('SeedSwap', accounts => {
         eAmount: eAmount,
         tAmount: tAmount,
         dAmount: new BN(0),
-        timestamp: new BN(0)
+        timestamp: new BN(0),
+        daysID: new BN(0)
       }
     }
 
@@ -229,12 +231,14 @@ contract('SeedSwap', accounts => {
       Helper.assertEqual(userData.ids.length, data.tokenAmounts.length);
       Helper.assertEqual(userData.ids.length, data.distributedAmounts.length);
       Helper.assertEqual(userData.ids.length, data.timestamps.length);
+      Helper.assertEqual(userData.ids.length, data.daysIDs.length);
       for(let j = 0; j < userData.ids.length; j++) {
         let object = swapObjects[userData.ids[j]];
         Helper.assertEqual(object.eAmount, data.ethAmounts[j]);
         Helper.assertEqual(object.tAmount, data.tokenAmounts[j]);
         Helper.assertEqual(object.dAmount, data.distributedAmounts[j]);
         Helper.assertEqual(object.timestamp, data.timestamps[j]);
+        Helper.assertEqual(object.daysID, data.daysIDs[j]);
       }
     }
 
@@ -262,6 +266,7 @@ contract('SeedSwap', accounts => {
         let numLoops = 50;
         let ethRecipient = await seedSwap.ethRecipient();
         let userMinCap = await seedSwap.MIN_INDIVIDUAL_CAP();
+        let startTime = await seedSwap.saleStartTime();
 
         let gasUsed = new BN(0);
         let txCount = 0;
@@ -294,6 +299,7 @@ contract('SeedSwap', accounts => {
 
           let swapObject = generateSwapObject(sender, ethAmount, expectedTokenAmount, 0);
           swapObject.timestamp = new BN(await Helper.currentBlockTime());
+          swapObject.daysID = swapObject.timestamp.sub(startTime).div(await seedSwap.DISTRIBUTE_PERIOD_UNIT()) * 1;
           swapObjects.push(swapObject);
           if (userData[sender] == undefined) {
             userData[sender] = generateUserObject();
@@ -367,6 +373,7 @@ contract('SeedSwap', accounts => {
 
     const makeSomeSwapsAndCheckData = async function(num) {
       Helper.assertEqual(0, await seedSwap.getNumberSwaps());
+      let startTime = await seedSwap.saleStartTime();
       let userMinCap = await seedSwap.MIN_INDIVIDUAL_CAP();
       for(let id = 0; id < num; id++) {
         let ethAmount = userMinCap.add(new BN(Helper.getRandomNumer(0, 1000000000)));
@@ -386,6 +393,7 @@ contract('SeedSwap', accounts => {
 
         let swapObject = generateSwapObject(sender, ethAmount, expectedTokenAmount, 0);
         swapObject.timestamp = new BN(await Helper.currentBlockTime());
+        swapObject.daysID = swapObject.timestamp.sub(startTime).div(await seedSwap.DISTRIBUTE_PERIOD_UNIT()) * 1
         swapObjects.push(swapObject);
         if (userData[sender] == undefined) {
           userData[sender] = generateUserObject();
@@ -408,13 +416,13 @@ contract('SeedSwap', accounts => {
         );
         object.dAmount = allSwaps.distributedAmounts[i];
         object.timestamp = allSwaps.timestamps[i];
+        object.daysID = allSwaps.daysIDs[i];
         checkSwapObjectEqual(swapObjects[i], object);
       }
     }
 
     const updateDataAfterDistributed = async function(percentage, id) {
-      let amount = swapObjects[id].tAmount.sub(swapObjects[id].dAmount);
-      amount = amount.mul(new BN(percentage)).div(new BN(100));
+      let amount = swapObjects[id].tAmount.mul(new BN(percentage)).div(new BN(100));
       swapObjects[id].dAmount = swapObjects[id].dAmount.add(amount);
       // check object and user's data have been updated correctly
       checkSwapObjectEqual(swapObjects[id], await seedSwap.listSwaps(id));
@@ -465,20 +473,20 @@ contract('SeedSwap', accounts => {
         userTokenBalances[owner] = userTokenBalances[owner].sub(totalTokens);
         totalDistributed = new BN(0);
 
-        for(let i = 0; i < 5; i++) {
-          let percentage = Helper.getRandomNumer(1, 99);
-          let timeUnits = Helper.getRandomNumer(10, 100);
+        let numLoops = 5;
+        for(let i = 0; i < numLoops; i++) {
+          // make sure total percentage <= 100
+          let percentage = Helper.getRandomNumer(1, Math.floor(100 / numLoops));
+          let daysID = Helper.getRandomNumer(0, 2);
           let balanceBefore = await teaToken.balanceOf(seedSwap.address);
-          await seedSwap.distributeAll(percentage, timeUnits, { from: admin });
+          await seedSwap.distributeAll(percentage, daysID, { from: admin });
           let balanceAfter = await teaToken.balanceOf(seedSwap.address);
-          let timestamp = new BN((await Helper.currentBlockTime())).sub(
-            new BN(timeUnits).mul(await seedSwap.DISTRIBUTE_PERIOD_UNIT())
-          );
           let distributedAmount = new BN(0);
           for(let j = 0; j < swapObjects.length; j++) {
-            if (swapObjects[j].timestamp > timestamp) break;
-            let amount = await updateDataAfterDistributed(percentage, j);
-            distributedAmount = distributedAmount.add(amount);
+            if (swapObjects[j].daysID == daysID) {
+              let amount = await updateDataAfterDistributed(percentage, j);
+              distributedAmount = distributedAmount.add(amount);
+            }
           }
           totalDistributed = totalDistributed.add(distributedAmount);
           Helper.assertEqual(distributedAmount, balanceBefore.sub(balanceAfter));
@@ -500,8 +508,9 @@ contract('SeedSwap', accounts => {
         userTokenBalances[owner] = userTokenBalances[owner].sub(totalTokens);
         totalDistributed = new BN(0);
 
-        for(let i = 0; i < 5; i++) {
-          let percentage = Helper.getRandomNumer(1, 99);
+        let numLoops = 5;
+        for(let i = 0; i < numLoops; i++) {
+          let percentage = Helper.getRandomNumer(1, Math.floor(100 / numLoops));
           // create random batches
           let batches = [];
           for(let j = 0; j < swapObjects.length; j++) {
@@ -527,32 +536,6 @@ contract('SeedSwap', accounts => {
             Helper.assertEqual(userTokenBalances[accounts[j]], await teaToken.balanceOf(accounts[j]));
           }
         }
-      });
-
-      it(`Test distribute after distributed all, nothing happen`, async() => {
-        await makeSomeSwapsAndCheckData(10);
-        await delayToEndTime();
-        let totalTokens = await seedSwap.totalSwappedToken();
-        await teaToken.transfer(seedSwap.address, totalTokens, { from: owner });
-        userTokenBalances[owner] = userTokenBalances[owner].sub(totalTokens);
-
-        // distribute all users 100%
-        await seedSwap.distributeAll(100, 0, { from: owner });
-
-        // distribute again
-        let balanceToken = await teaToken.balanceOf(seedSwap.address);
-        await seedSwap.distributeAll(100, 0, { from: owner });
-        // balance is not changed
-        Helper.assertEqual(balanceToken, await teaToken.balanceOf(seedSwap.address));
-        // total distributed is not changed
-        Helper.assertEqual(totalTokens, await seedSwap.totalDistributedToken());
-
-        // call distribute batch
-        await seedSwap.distributeBatch(100, [0], { from: owner });
-        // balance is not changed
-        Helper.assertEqual(balanceToken, await teaToken.balanceOf(seedSwap.address));
-        // total distributed is not changed
-        Helper.assertEqual(totalTokens, await seedSwap.totalDistributedToken());
       });
 
       it(`Test user emergency withdraw tokens`, async() => {
@@ -667,7 +650,12 @@ contract('SeedSwap', accounts => {
 
         await teaToken.transfer(seedSwap.address, swapObjects[0].tAmount, { from: owner });
         await seedSwap.distributeAll(50, 0, { from: admin });
-        await seedSwap.distributeAll(100, 0, { from: admin });
+        // distribute more than 100^
+        await expectRevert(
+          seedSwap.distributeAll(51, 0, { from: admin }),
+          "Distribute: total distribute more than 100%"
+        );
+        await seedSwap.distributeAll(50, 0, { from: admin });
       });
 
       it(`Test distributeBatch reverts`, async() => {
@@ -742,8 +730,14 @@ contract('SeedSwap', accounts => {
           "Distribute: indices are not in order"
         );
 
-        await seedSwap.distributeBatch(50, [0,1], { from: admin });
-        await seedSwap.distributeBatch(100, [0,1], { from: admin });
+        await seedSwap.distributeBatch(50, [0], { from: admin });
+        // revert distribute more than 100%
+        await expectRevert(
+          seedSwap.distributeBatch(51, [0,1], { from: admin }),
+          "Distribute: total distribute more than 100%"
+        )
+        await seedSwap.distributeBatch(51, [1], { from: admin });
+        await seedSwap.distributeBatch(50, [0], { from: admin });
       });
     });
 
@@ -777,20 +771,20 @@ contract('SeedSwap', accounts => {
         let totalTokenAmount = await seedSwap.totalSwappedToken();
         await teaToken.transfer(seedSwap.address, totalTokenAmount, { from: owner });
 
-        for(let i = 0; i < 10; i++) {
-          let percentage = Helper.getRandomNumer(1, 100);
-          let timeUnits = Helper.getRandomNumer(10, 100);
-          let timestamp = new BN((await Helper.currentBlockTime())).sub(
-            new BN(timeUnits).mul(await seedSwap.DISTRIBUTE_PERIOD_UNIT())
-          );
+        let numLoops = 10;
+        let totalPercentage = 0;
+        for(let i = 0; i < numLoops; i++) {
+          let percentage = Helper.getRandomNumer(1, Math.floor(100 / numLoops));
+          totalPercentage += percentage;
+          let daysID = Helper.getRandomNumer(0, 10);
           let totalAmounts = new BN(0);
           let totalUsers = 0;
           let selectedIds = [];
           let selectedUsers = [];
           let selectDAmounts = [];
           for(let j = 0; j < swapObjects.length; j++) {
-            if (swapObjects[j].timestamp > timestamp) break;
-            amount = swapObjects[j].tAmount.sub(swapObjects[j].dAmount).mul(new BN(percentage)).div(new BN(100));
+            if (swapObjects[j].daysID != daysID) continue;
+            amount = swapObjects[j].tAmount.mul(new BN(percentage)).div(new BN(100));
             if (amount.gt(new BN(0))) {
               totalUsers += 1;
               selectedIds.push(j);
@@ -799,7 +793,7 @@ contract('SeedSwap', accounts => {
               totalAmounts = totalAmounts.add(amount);
             }
           }
-          let estData = await seedSwap.estimateDistributedAllData(percentage, timeUnits);
+          let estData = await seedSwap.estimateDistributedAllData(percentage, daysID);
           await verifySelectedDistributeData(
             estData,
             totalUsers <= safeNumber * 1,
@@ -813,22 +807,29 @@ contract('SeedSwap', accounts => {
           // random if should distribute
           if (Helper.getRandomNumer(0, 100) % 2 == 0) {
             // distribute and update user data + swap objects
-            await seedSwap.distributeAll(percentage, timeUnits, { from: admin });
-            let timestamp = new BN((await Helper.currentBlockTime())).sub(
-              new BN(timeUnits).mul(await seedSwap.DISTRIBUTE_PERIOD_UNIT())
-            );
+            await seedSwap.distributeAll(percentage, daysID, { from: admin });
             for(let j = 0; j < swapObjects.length; j++) {
-              if (swapObjects[j].timestamp > timestamp) break;
-              await updateDataAfterDistributed(percentage, j);
+              if (swapObjects[j].daysID == daysID) {
+                await updateDataAfterDistributed(percentage, j);
+              }
             }
           }
         }
-
-        // distribute all and re-check
-        await seedSwap.distributeAll(100, 0, { from: admin });
-        let estData = await seedSwap.estimateDistributedAllData(100, 0);
-        await verifySelectedDistributeData(estData, true, 0, 0, [], [], []);
       });
+
+      it(`Test estimateDistributeAll returns empty`, async() => {
+        let numberSwaps = 10;
+        await makeSomeSwapsAndCheckData(numberSwaps);
+        await delayToEndTime();
+        let totalTokenAmount = await seedSwap.totalSwappedToken();
+        await teaToken.transfer(seedSwap.address, totalTokenAmount, { from: owner });
+
+        for(let i = 0; i < numberSwaps; i++) {
+          await seedSwap.distributeAll(100, i, { from: admin });
+          let estData = await seedSwap.estimateDistributedAllData(100, i);
+          await verifySelectedDistributeData(estData, true, 0, 0, [], [], []);
+        }
+      })
   
       it(`Test estimateDistributeAll reverts`, async() => {
         await makeSomeSwapsAndCheckData(10);
@@ -864,6 +865,20 @@ contract('SeedSwap', accounts => {
           seedSwap.estimateDistributedAllData(50, 0),
           "Estimate: not enough token balance"
         );
+
+        await teaToken.transfer(seedSwap.address, await seedSwap.totalSwappedToken(), { from: owner });
+
+        for(let i = 0; i < swapObjects.length; i++) {
+          let daysID = swapObjects[i].daysID;
+          if (i > 0 && daysID == swapObjects[i - 1].daysID) continue;
+          await seedSwap.distributeAll(50, daysID, { from: admin });
+          await expectRevert(
+            seedSwap.estimateDistributedAllData(51, daysID, { from: admin }),
+            "Estimate: total distribute more than 100%"
+          );
+          // can call with 50
+          await seedSwap.estimateDistributedAllData(50, daysID, { from: admin });
+        }
       });
   
       it(`Test estimateDistributeBatch`, async() => {
@@ -873,8 +888,11 @@ contract('SeedSwap', accounts => {
         let totalTokenAmount = await seedSwap.totalSwappedToken();
         await teaToken.transfer(seedSwap.address, totalTokenAmount, { from: owner });
 
-        for(let i = 0; i < 10; i++) {
-          let percentage = Helper.getRandomNumer(1, 100);
+        let numLoops = 10;
+        let totalPercentage = 0;
+        for(let i = 0; i < numLoops; i++) {
+          let percentage = Helper.getRandomNumer(1, Math.floor(100 / numLoops));
+          totalPercentage += percentage;
           let batches = [];
           for(let j = 0; j < swapObjects.length; j++) {
             if (Helper.getRandomNumer(0, 100) % 2 == 0) {
@@ -888,7 +906,7 @@ contract('SeedSwap', accounts => {
           let selectDAmounts = [];
           for(let jj = 0; jj < batches.length; jj++) {
             let j = batches[jj];
-            amount = swapObjects[j].tAmount.sub(swapObjects[j].dAmount).mul(new BN(percentage)).div(new BN(100));
+            amount = swapObjects[j].tAmount.mul(new BN(percentage)).div(new BN(100));
             if (amount.gt(new BN(0))) {
               totalUsers += 1;
               selectedIds.push(j);
@@ -917,17 +935,22 @@ contract('SeedSwap', accounts => {
             }
           }
         }
+      });
 
+      it(`Test estimateDistributeBatch returns empty`, async() => {
+        let numberSwaps = 10;
+        await makeSomeSwapsAndCheckData(numberSwaps);
+        await delayToEndTime();
+        let totalTokenAmount = await seedSwap.totalSwappedToken();
+        await teaToken.transfer(seedSwap.address, totalTokenAmount, { from: owner });
         let batches = [];
         for(let i = 0; i < swapObjects.length; i++) {
           batches.push(i);
         }
-
-        // distribute all and re-check
         await seedSwap.distributeBatch(100, batches, { from: admin });
         let estData = await seedSwap.estimateDistributedBatchData(100, batches);
         await verifySelectedDistributeData(estData, true, 0, 0, [], [], []);
-      });
+      })
   
       it(`Test estimateDistributeBatch reverts`, async() => {
         await makeSomeSwapsAndCheckData(2);
@@ -993,6 +1016,14 @@ contract('SeedSwap', accounts => {
           seedSwap.estimateDistributedBatchData(50, [1, 1], { from: admin }),
           "Estimate: duplicated ids"
         );
+
+        await seedSwap.distributeBatch(50, [0], { from: admin });
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(51, [0,1], { from: admin }),
+          "Estimate: total distribute more than 100%"
+        );
+        await seedSwap.estimateDistributedAllData(50, [0], { from: admin });
+        await seedSwap.estimateDistributedAllData(100, [1], { from: admin });
       });
     });
   });

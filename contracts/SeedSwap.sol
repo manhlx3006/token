@@ -46,7 +46,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         uint128 eAmount; // eth amount
         uint128 tAmount; // token amount
         uint128 dAmount; // distributed token amount
-        uint128 timestamp;
+        uint112 timestamp;
+        uint16 daysID;
     }
 
     // all swaps that are made by users
@@ -66,7 +67,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         address indexed trader,
         uint256 indexed ethAmount,
         uint256 indexed teaAmount,
-        uint256 blockTimestamp
+        uint256 blockTimestamp,
+        uint16 daysID
     );
     event UpdateSaleTimes(
         uint256 indexed newStartTime,
@@ -220,13 +222,17 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         uint256 ethAmount = msg.value;
         tokenAmount = _getTokenAmount(ethAmount);
 
+        // should pass the check that presale has started, so no underflow here
+        uint256 daysID = (block.timestamp - saleStartTime) / DISTRIBUTE_PERIOD_UNIT;
+        assert(daysID < 2**16); // should have only few days for presale
         // record new swap
         SwapData memory _swapData = SwapData({
             user: sender,
             eAmount: uint128(ethAmount),
             tAmount: uint128(tokenAmount),
             dAmount: uint128(0),
-            timestamp: uint128(block.timestamp)
+            timestamp: uint112(block.timestamp),
+            daysID: uint16(daysID)
         });
         listSwaps.push(_swapData);
         // update user swap data
@@ -241,23 +247,20 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         // transfer eth to recipient
         ethRecipient.transfer(msg.value);
 
-        emit SwappedEthToTea(sender, ethAmount, tokenAmount, block.timestamp);
+        emit SwappedEthToTea(sender, ethAmount, tokenAmount, block.timestamp, uint16(daysID));
     }
 
     /// ================ DISTRIBUTE TOKENS ====================
 
     /// @dev admin can call this function to perform distribute to all eligible swaps
     /// @param percentage percentage of undistributed amount will be distributed
-    /// @param units only distribute for swaps that were made
-    ///         before units * DISTRIBUTE_PERIOD_UNIT from now
-    function distributeAll(uint256 percentage, uint256 units)
+    /// @param daysID only distribute for swaps that were made at that day from start
+    function distributeAll(uint256 percentage, uint16 daysID)
         external onlyWhitelistAdmin whenEnded whenNotPaused onlyValidPercentage(percentage)
         returns (uint256 totalAmount)
     {
-        uint256 timestamp = block.timestamp.sub(units * DISTRIBUTE_PERIOD_UNIT);
         for(uint256 i = 0; i < listSwaps.length; i++) {
-            SwapData memory data = listSwaps[i];
-            if (data.timestamp <= timestamp) {
+            if (listSwaps[i].daysID == daysID) {
                 totalAmount += _distributedToken(i, percentage);
             }
         }
@@ -341,7 +344,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             uint128[] memory ethAmounts,
             uint128[] memory tokenAmounts,
             uint128[] memory distributedAmounts,
-            uint128[] memory timestamps
+            uint112[] memory timestamps,
+            uint16[] memory daysIDs
         )
     {
         uint256 len = listSwaps.length;
@@ -349,7 +353,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         ethAmounts = new uint128[](len);
         tokenAmounts = new uint128[](len);
         distributedAmounts = new uint128[](len);
-        timestamps = new uint128[](len);
+        timestamps = new uint112[](len);
+        daysIDs = new uint16[](len);
 
         for(uint256 i = 0; i < len; i++) {
             SwapData memory data = listSwaps[i];
@@ -358,6 +363,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             tokenAmounts[i] = data.tAmount;
             distributedAmounts[i] = data.dAmount;
             timestamps[i] = data.timestamp;
+            daysIDs[i] = data.daysID;
         }
     }
 
@@ -372,7 +378,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             uint128[] memory ethAmounts,
             uint128[] memory tokenAmounts,
             uint128[] memory distributedAmounts,
-            uint128[] memory timestamps
+            uint112[] memory timestamps,
+            uint16[] memory daysIDs
         )
     {
         totalEthAmount = userSwapData[user].eAmount;
@@ -385,24 +392,25 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         ethAmounts = new uint128[](swapDataIDs.length);
         tokenAmounts = new uint128[](swapDataIDs.length);
         distributedAmounts = new uint128[](swapDataIDs.length);
-        timestamps = new uint128[](swapDataIDs.length);
+        timestamps = new uint112[](swapDataIDs.length);
+        daysIDs = new uint16[](swapDataIDs.length);
 
         for(uint256 i = 0; i < swapDataIDs.length; i++) {
             ethAmounts[i] = listSwaps[swapDataIDs[i]].eAmount;
             tokenAmounts[i] = listSwaps[swapDataIDs[i]].tAmount;
             distributedAmounts[i] = listSwaps[swapDataIDs[i]].dAmount;
             timestamps[i] = listSwaps[swapDataIDs[i]].timestamp;
+            daysIDs[i] = listSwaps[swapDataIDs[i]].daysID;
         }
     }
 
     /// @dev returns list of users and distributed amounts if user calls distributeAll function
     /// in case anything is wrong, it will revert
     /// @param percentage percentage of undistributed amount will be distributed
-    /// @param units only distribute for swaps that were made
-    ///         before units * DISTRIBUTE_PERIOD_UNIT from now
+    /// @param daysID only distribute for swaps that were made aat daysID from start
     function estimateDistributedAllData(
         uint128 percentage,
-        uint256 units
+        uint16 daysID
     )
         external view
         whenEnded
@@ -414,36 +422,40 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             uint256 totalDistributingAmount,
             uint256[] memory selectedIds,
             address[] memory users,
-            uint128[] memory distributingAmounts
+            uint128[] memory distributingAmounts,
+            uint16[] memory daysIDs
         )
     {
-        // only distribute to orders that before this timestamp
-        uint256 timestamp = block.timestamp.sub(units * DISTRIBUTE_PERIOD_UNIT);
-
         // count number of data that can be distributed
         totalUsers = 0;
         for(uint256 i = 0; i < listSwaps.length; i++) {
-            if (listSwaps[i].timestamp > timestamp) break;
-            // has undistributed amount
-            if (listSwaps[i].tAmount > listSwaps[i].dAmount) totalUsers += 1;
+            if (listSwaps[i].daysID == daysID && listSwaps[i].tAmount > listSwaps[i].dAmount) {
+                totalUsers += 1;
+            }
         }
 
         // return data that will be used to distribute
         selectedIds = new uint256[](totalUsers);
         users = new address[](totalUsers);
         distributingAmounts = new uint128[](totalUsers);
+        daysIDs = new uint16[](totalUsers);
 
         uint256 counter = 0;
         for(uint256 i = 0; i < listSwaps.length; i++) {
             SwapData memory data = listSwaps[i];
-            if (listSwaps[i].timestamp > timestamp) break;
-            if (listSwaps[i].tAmount == listSwaps[i].dAmount) continue;
-            selectedIds[counter] = i;
-            users[counter] = data.user;
-            // don't need to use SafeMath here
-            distributingAmounts[counter] = (data.tAmount - data.dAmount) * percentage / 100;
-            totalDistributingAmount += distributingAmounts[counter];
-            counter += 1;
+            if (listSwaps[i].daysID == daysID && listSwaps[i].tAmount > listSwaps[i].dAmount) {
+                selectedIds[counter] = i;
+                users[counter] = data.user;
+                // don't need to use SafeMath here
+                distributingAmounts[counter] = data.tAmount * percentage / 100;
+                require(
+                    distributingAmounts[counter] + data.dAmount <= data.tAmount,
+                    "Estimate: total distribute more than 100%"
+                );
+                daysIDs[counter] = listSwaps[i].daysID;
+                totalDistributingAmount += distributingAmounts[counter];
+                counter += 1;
+            }
         }
         require(
             totalDistributingAmount <= saleToken.balanceOf(address(this)),
@@ -468,7 +480,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             uint256 totalDistributingAmount,
             uint256[] memory selectedIds,
             address[] memory users,
-            uint128[] memory distributingAmounts
+            uint128[] memory distributingAmounts,
+            uint16[] memory daysIDs
         )
     {
         totalUsers = 0;
@@ -482,6 +495,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         selectedIds = new uint256[](totalUsers);
         users = new address[](totalUsers);
         distributingAmounts = new uint128[](totalUsers);
+        daysIDs = new uint16[](totalUsers);
+
         uint256 counter = 0;
         for(uint256 i = 0; i < ids.length; i++) {
             if (listSwaps[i].tAmount <= listSwaps[i].dAmount) continue;
@@ -489,8 +504,13 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             selectedIds[counter] = ids[i];
             users[counter] = data.user;
             // don't need to use SafeMath here
-            distributingAmounts[counter] = (data.tAmount - data.dAmount) * percentage / 100;
+            distributingAmounts[counter] = data.tAmount * percentage / 100;
+            require(
+                distributingAmounts[counter] + data.dAmount <= data.tAmount,
+                "Estimate: total distribute more than 100%"
+            );
             totalDistributingAmount += distributingAmounts[counter];
+            daysIDs[counter] = listSwaps[i].daysID;
             counter += 1;
         }
         require(
@@ -506,9 +526,13 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         returns (uint256 distributingAmount)
     {
         SwapData memory data = listSwaps[id];
-        uint256 uAmount = uint256(data.tAmount.sub(data.dAmount));
-        distributingAmount = uAmount.mul(percentage).div(100);
-        if (distributingAmount == 0) return 0; // no action if distributingAmount == 0
+        distributingAmount = uint256(data.tAmount).mul(percentage).div(100);
+        require(
+            distributingAmount.add(data.dAmount) <= data.tAmount,
+            "Distribute: total distribute more than 100%"
+        );
+        // percentage > 0, data.tAmount > 0
+        assert (distributingAmount > 0);
         require(
             distributingAmount <= saleToken.balanceOf(address(this)),
             "Distribute: not enough token to distribute"

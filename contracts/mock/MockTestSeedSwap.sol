@@ -20,7 +20,7 @@ contract MockTestSeedSwap is SeedSwap {
         MIN_INDIVIDUAL_CAP = 10**10;
         MAX_INDIVIDUAL_CAP = maxUserCap;
         WITHDRAWAL_DEADLINE = 300 seconds; // 5 mins after ended
-        DISTRIBUTE_PERIOD_UNIT = 1 seconds; // change unit to 1 second
+        DISTRIBUTE_PERIOD_UNIT = 5 seconds; // change unit from 1 day to 5 second
         SAFE_DISTRIBUTE_NUMBER = 5;
     }
 }
