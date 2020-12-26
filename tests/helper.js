@@ -43,8 +43,17 @@ module.exports.currentBlockTime = function() {
     });
 }
 
-module.exports.assertEqual = function (val1, val2, errorStr) {
+function assertEqual(val1, val2, errorStr) {
     assert(new BN(val1).should.be.a.bignumber.that.equals(new BN(val2)), errorStr);
+}
+
+module.exports.assertEqual = assertEqual;
+
+module.exports.assertEqualArray = function (arr1, arr2, errorStr) {
+    assertEqual(arr1.length, arr2.length, errorStr);
+    for(let i = 0; i < arr1.length; i++) {
+        assertEqual(arr1[i], arr2[i], errorStr);
+    }
 }
 
 module.exports.assertGreater = function(val1, val2, errorStr) {

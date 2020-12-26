@@ -4,8 +4,8 @@ const MockTestSeedSwap = artifacts.require('MockTestSeedSwap.sol');
 
 const BN = web3.utils.BN;
 
-const Helper = require('../helper');
-const { ethAddress, address0, ethDecimals, ethUnit} = require('../helper');
+const Helper = require('./helper');
+const { ethAddress, address0, ethDecimals, ethUnit} = require('./helper');
 const {expectRevert, expectEvent} = require('@openzeppelin/test-helpers');
 
 let teaToken;
@@ -15,6 +15,13 @@ let admin;
 let owner;
 let user;
 let ethAmount = new BN(10).pow(new BN(15));
+
+let userData = {}
+let swapObjects = [];
+let currentEthSwapped;
+let currentTokenSwapped;
+let totalDistributed;
+let userTokenBalances = {};
 
 contract('SeedSwap', accounts => {
   describe('Test SeedSwap main functions', async () => {
@@ -28,7 +35,7 @@ contract('SeedSwap', accounts => {
     });
 
     describe(`Test Constructor`, async() => {
-      it(`Test data correct after deployed`, async() => {
+      it(`Test data correct after deployed, owner != deployer`, async() => {
         seedSwap = await SeedSwap.new(owner, teaToken.address, { from: deployer });
         Helper.assertEqual(teaToken.address, await seedSwap.saleToken());
         Helper.assertEqual(owner, await seedSwap.owner());
@@ -37,6 +44,13 @@ contract('SeedSwap', accounts => {
         Helper.assertEqual(true, await seedSwap.isWhitelistAdmin(deployer));
         Helper.assertEqual(owner, await seedSwap.ethRecipient());
         Helper.assertEqual(false, await seedSwap.isPaused());
+      });
+
+      it(`Test deploy with deployer == owner`, async() => {
+        seedSwap = await SeedSwap.new(owner, teaToken.address, { from: owner });
+        Helper.assertEqual(owner, await seedSwap.owner());
+        Helper.assertEqual(true, await seedSwap.isWhitelistAdmin(owner));
+        Helper.assertEqual(owner, await seedSwap.ethRecipient());
       });
 
       it(`Test invalid constructor params`, async() => {
@@ -50,14 +64,14 @@ contract('SeedSwap', accounts => {
     const delayToStartTime = async() => {
       // delay to start time
       let currentTime = await Helper.currentBlockTime();
-      let duration = (await seedSwap.saleStartTime()) * 1 - currentTime;
+      let duration = (await seedSwap.saleStartTime()) * 1 + 1 - currentTime;
       await Helper.delayChainTime(duration);
     }
 
     const delayToEndTime = async() => {
       // delay to start time
       let currentTime = await Helper.currentBlockTime();
-      let duration = (await seedSwap.saleEndTime()) * 1 - currentTime;
+      let duration = (await seedSwap.saleEndTime()) * 1 + 1 - currentTime;
       await Helper.delayChainTime(duration);
     }
 
@@ -225,10 +239,6 @@ contract('SeedSwap', accounts => {
     }
 
     describe(`Test Swap, data changes correctly`, async() => {
-      let userData = {}
-      let swapObjects = [];
-      let currentEthSwapped;
-      let currentTokenSwapped;
       beforeEach(`Init contracts for each test`, async() => {
         let currentTime = new BN(await Helper.currentBlockTime());
         seedSwap = await MockTestSeedSwap.new(
@@ -355,15 +365,68 @@ contract('SeedSwap', accounts => {
       });
     });
 
-    describe(`Test distribute`, async() => {
-      let userData = {}
-      let swapObjects = [];
-      let currentEthSwapped;
-      let currentTokenSwapped;
-      let totalDistributed;
-      let userTokenBalances = {};
-      beforeEach(`Init contracts for each test`, async() => {
-        let currentTime = new BN(await Helper.currentBlockTime());
+    const makeSomeSwapsAndCheckData = async function(num) {
+      Helper.assertEqual(0, await seedSwap.getNumberSwaps());
+      let userMinCap = await seedSwap.MIN_INDIVIDUAL_CAP();
+      for(let id = 0; id < num; id++) {
+        let ethAmount = userMinCap.add(new BN(Helper.getRandomNumer(0, 1000000000)));
+        let expectedTokenAmount = ethAmount.mul(await seedSwap.saleRate());
+        let userId = Helper.getRandomNumer(0, accounts.length - 1);
+        let sender = accounts[userId];
+
+        if (Helper.getRandomNumer(0, 100) % 2 == 0) {
+          await seedSwap.swapEthToToken({ from: sender, value: ethAmount });
+        } else {
+          await Helper.transferEth(sender, seedSwap.address, ethAmount);
+        }
+
+        /// update data
+        currentEthSwapped.iadd(ethAmount);
+        currentTokenSwapped.iadd(expectedTokenAmount);
+
+        let swapObject = generateSwapObject(sender, ethAmount, expectedTokenAmount, 0);
+        swapObject.timestamp = new BN(await Helper.currentBlockTime());
+        swapObjects.push(swapObject);
+        if (userData[sender] == undefined) {
+          userData[sender] = generateUserObject();
+        }
+        userData[sender].eAmount.iadd(ethAmount);
+        userData[sender].tAmount.iadd(expectedTokenAmount);
+        userData[sender].ids.push(swapObjects.length - 1);
+        // check data
+        Helper.assertEqual(id + 1, await seedSwap.getNumberSwaps());
+        // check new object swap
+        checkSwapObjectEqual(swapObjects[id], await seedSwap.listSwaps(id));
+      }
+      // check all object swaps
+      let allSwaps = await seedSwap.getAllSwaps();
+      for(let i = 0; i < num; i++) {
+        let object = generateSwapObject(
+          allSwaps.users[i],
+          allSwaps.ethAmounts[i],
+          allSwaps.tokenAmounts[i]
+        );
+        object.dAmount = allSwaps.distributedAmounts[i];
+        object.timestamp = allSwaps.timestamps[i];
+        checkSwapObjectEqual(swapObjects[i], object);
+      }
+    }
+
+    const updateDataAfterDistributed = async function(percentage, id) {
+      let amount = swapObjects[id].tAmount.sub(swapObjects[id].dAmount);
+      amount = amount.mul(new BN(percentage)).div(new BN(100));
+      swapObjects[id].dAmount = swapObjects[id].dAmount.add(amount);
+      // check object and user's data have been updated correctly
+      checkSwapObjectEqual(swapObjects[id], await seedSwap.listSwaps(id));
+      let user = swapObjects[id].user;
+      // add distributed amount to user, and user's token balance
+      userData[user].dAmount = userData[user].dAmount.add(amount);
+      userTokenBalances[user] = userTokenBalances[user].add(amount);
+      return amount;
+    }
+
+    const deployAndInitData = async function() {
+      let currentTime = new BN(await Helper.currentBlockTime());
         seedSwap = await MockTestSeedSwap.new(
           owner,
           teaToken.address,
@@ -387,53 +450,15 @@ contract('SeedSwap', accounts => {
           userTokenBalances[accounts[i]] = await teaToken.balanceOf(accounts[i]);
           userData[accounts[i]] = generateUserObject();
         }
+    }
+
+    describe(`Test distribute`, async() => {
+      beforeEach(`Init contracts for each test`, async() => {
+        await deployAndInitData();
       });
 
-      const makeSomeSwaps = async function(num) {
-        let userMinCap = await seedSwap.MIN_INDIVIDUAL_CAP();
-        for(let id = 0; id < num; id++) {
-          let ethAmount = userMinCap.add(new BN(Helper.getRandomNumer(0, 1000000000)));
-          let expectedTokenAmount = ethAmount.mul(await seedSwap.saleRate());
-          let userId = Helper.getRandomNumer(0, accounts.length - 1);
-          let sender = accounts[userId];
-
-          if (Helper.getRandomNumer(0, 100) % 2 == 0) {
-            await seedSwap.swapEthToToken({ from: sender, value: ethAmount });
-          } else {
-            await Helper.transferEth(sender, seedSwap.address, ethAmount);
-          }
-
-          /// update data
-          currentEthSwapped.iadd(ethAmount);
-          currentTokenSwapped.iadd(expectedTokenAmount);
-
-          let swapObject = generateSwapObject(sender, ethAmount, expectedTokenAmount, 0);
-          swapObject.timestamp = new BN(await Helper.currentBlockTime());
-          swapObjects.push(swapObject);
-          if (userData[sender] == undefined) {
-            userData[sender] = generateUserObject();
-          }
-          userData[sender].eAmount.iadd(ethAmount);
-          userData[sender].tAmount.iadd(expectedTokenAmount);
-          userData[sender].ids.push(swapObjects.length - 1);
-        }
-      }
-
-      const updateDataAfterDistributed = async function(percentage, id) {
-        let amount = swapObjects[id].tAmount.sub(swapObjects[id].dAmount);
-        amount = amount.mul(new BN(percentage)).div(new BN(100));
-        swapObjects[id].dAmount = swapObjects[id].dAmount.add(amount);
-        // check object and user's data have been updated correctly
-        checkSwapObjectEqual(swapObjects[id], await seedSwap.listSwaps(id));
-        let user = swapObjects[id].user;
-        // add distributed amount to user, and user's token balance
-        userData[user].dAmount = userData[user].dAmount.add(amount);
-        userTokenBalances[user] = userTokenBalances[user].add(amount);
-        return amount;
-      }
-
       it(`Test distributeAll`, async() => {
-        await makeSomeSwaps(40);
+        await makeSomeSwapsAndCheckData(40);
         await delayToEndTime();
         let totalTokens = await seedSwap.totalSwappedToken();
         await teaToken.transfer(seedSwap.address, totalTokens, { from: owner });
@@ -468,7 +493,7 @@ contract('SeedSwap', accounts => {
       });
 
       it(`Test distributeBatch`, async() => {
-        await makeSomeSwaps(40);
+        await makeSomeSwapsAndCheckData(40);
         await delayToEndTime();
         let totalTokens = await seedSwap.totalSwappedToken();
         await teaToken.transfer(seedSwap.address, totalTokens, { from: owner });
@@ -504,22 +529,64 @@ contract('SeedSwap', accounts => {
         }
       });
 
-      it(`Test user emergency withdraw tokens`, async() => {
-        await makeSomeSwaps(40);
-
+      it(`Test distribute after distributed all, nothing happen`, async() => {
+        await makeSomeSwapsAndCheckData(10);
+        await delayToEndTime();
         let totalTokens = await seedSwap.totalSwappedToken();
         await teaToken.transfer(seedSwap.address, totalTokens, { from: owner });
         userTokenBalances[owner] = userTokenBalances[owner].sub(totalTokens);
-        totalDistributed = new BN(0);
+
+        // distribute all users 100%
+        await seedSwap.distributeAll(100, 0, { from: owner });
+
+        // distribute again
+        let balanceToken = await teaToken.balanceOf(seedSwap.address);
+        await seedSwap.distributeAll(100, 0, { from: owner });
+        // balance is not changed
+        Helper.assertEqual(balanceToken, await teaToken.balanceOf(seedSwap.address));
+        // total distributed is not changed
+        Helper.assertEqual(totalTokens, await seedSwap.totalDistributedToken());
+
+        // call distribute batch
+        await seedSwap.distributeBatch(100, [0], { from: owner });
+        // balance is not changed
+        Helper.assertEqual(balanceToken, await teaToken.balanceOf(seedSwap.address));
+        // total distributed is not changed
+        Helper.assertEqual(totalTokens, await seedSwap.totalDistributedToken());
+      });
+
+      it(`Test user emergency withdraw tokens`, async() => {
+        await makeSomeSwapsAndCheckData(40);
 
         await expectRevert(
           seedSwap.emergencyUserWithdrawToken({ from: owner }),
           "Emergency: not open for emergency withdrawal"
-        )
+        );
+
         // delay to emergency withdraw time
         let time = (await seedSwap.saleEndTime()).add(await seedSwap.WITHDRAWAL_DEADLINE()).add(new BN(1));
         let currentTime = await Helper.currentBlockTime();
         await Helper.delayChainTime(time * 1 - currentTime);
+
+        // not enough token balance for withdrawal
+        let totalTokens = await seedSwap.totalSwappedToken();
+
+        for(let i = 0; i < accounts.length; i++) {
+          let sender = accounts[i];
+          let uAmount = userData[sender].tAmount.sub(userData[sender].dAmount);
+          if (uAmount.gt(new BN(0))) {
+            await expectRevert(
+              seedSwap.emergencyUserWithdrawToken({ from: sender }),
+              "Emergency: not enough token to distribute"
+            );
+          }
+        }
+
+        // transfer enough token to distribute
+        await teaToken.transfer(seedSwap.address, totalTokens, { from: owner });
+
+        userTokenBalances[owner] = userTokenBalances[owner].sub(totalTokens);
+        totalDistributed = new BN(0);
 
         for(let i = 0; i < accounts.length; i++) {
           let sender = accounts[i];
@@ -549,7 +616,7 @@ contract('SeedSwap', accounts => {
       });
 
       it(`Test distributeAll reverts`, async() => {
-        await makeSomeSwaps(1);
+        await makeSomeSwapsAndCheckData(1);
 
         // check not admin
         await seedSwap.updateWhitelistedAdmins([user], false, { from: owner });
@@ -604,7 +671,7 @@ contract('SeedSwap', accounts => {
       });
 
       it(`Test distributeBatch reverts`, async() => {
-        await makeSomeSwaps(2);
+        await makeSomeSwapsAndCheckData(2);
 
         // check not admin
         await seedSwap.updateWhitelistedAdmins([user], false, { from: owner });
@@ -678,6 +745,513 @@ contract('SeedSwap', accounts => {
         await seedSwap.distributeBatch(50, [0,1], { from: admin });
         await seedSwap.distributeBatch(100, [0,1], { from: admin });
       });
+    });
+
+    describe(`Test estimate distributes`, async() => {
+      before('init data and contracts', async () => {
+        deployer = accounts[0];
+        admin = accounts[1];
+        owner = accounts[2];
+        teaToken = await TeaToken.new(owner);
+      });
+  
+      beforeEach(`Before each test`, async() => {
+        await deployAndInitData();
+      });
+  
+      const verifySelectedDistributeData = async function(
+        estData, isSafe, totalUsers, totalAmount, ids, users, amounts
+      ) {
+        Helper.assertEqual(isSafe, estData.isSafe);
+        Helper.assertEqual(totalUsers, estData.totalUsers);
+        Helper.assertEqual(totalAmount, estData.totalDistributingAmount);
+        Helper.assertEqualArray(ids, estData.selectedIds);
+        Helper.assertEqualArray(users, estData.users);
+        Helper.assertEqualArray(amounts, estData.distributingAmounts);
+      }
+
+      it(`Test estimateDistributeAll`, async() => {
+        let safeNumber = await seedSwap.SAFE_DISTRIBUTE_NUMBER();
+        await makeSomeSwapsAndCheckData(safeNumber * 2);
+        await delayToEndTime();
+        let totalTokenAmount = await seedSwap.totalSwappedToken();
+        await teaToken.transfer(seedSwap.address, totalTokenAmount, { from: owner });
+
+        for(let i = 0; i < 10; i++) {
+          let percentage = Helper.getRandomNumer(1, 100);
+          let timeUnits = Helper.getRandomNumer(10, 100);
+          let timestamp = new BN((await Helper.currentBlockTime())).sub(
+            new BN(timeUnits).mul(await seedSwap.DISTRIBUTE_PERIOD_UNIT())
+          );
+          let totalAmounts = new BN(0);
+          let totalUsers = 0;
+          let selectedIds = [];
+          let selectedUsers = [];
+          let selectDAmounts = [];
+          for(let j = 0; j < swapObjects.length; j++) {
+            if (swapObjects[j].timestamp > timestamp) break;
+            amount = swapObjects[j].tAmount.sub(swapObjects[j].dAmount).mul(new BN(percentage)).div(new BN(100));
+            if (amount.gt(new BN(0))) {
+              totalUsers += 1;
+              selectedIds.push(j);
+              selectedUsers.push(swapObjects[j].user);
+              selectDAmounts.push(amount);
+              totalAmounts = totalAmounts.add(amount);
+            }
+          }
+          let estData = await seedSwap.estimateDistributedAllData(percentage, timeUnits);
+          await verifySelectedDistributeData(
+            estData,
+            totalUsers <= safeNumber * 1,
+            totalUsers,
+            totalAmounts,
+            selectedIds,
+            selectedUsers,
+            selectDAmounts
+          );
+
+          // random if should distribute
+          if (Helper.getRandomNumer(0, 100) % 2 == 0) {
+            // distribute and update user data + swap objects
+            await seedSwap.distributeAll(percentage, timeUnits, { from: admin });
+            let timestamp = new BN((await Helper.currentBlockTime())).sub(
+              new BN(timeUnits).mul(await seedSwap.DISTRIBUTE_PERIOD_UNIT())
+            );
+            for(let j = 0; j < swapObjects.length; j++) {
+              if (swapObjects[j].timestamp > timestamp) break;
+              await updateDataAfterDistributed(percentage, j);
+            }
+          }
+        }
+
+        // distribute all and re-check
+        await seedSwap.distributeAll(100, 0, { from: admin });
+        let estData = await seedSwap.estimateDistributedAllData(100, 0);
+        await verifySelectedDistributeData(estData, true, 0, 0, [], [], []);
+      });
+  
+      it(`Test estimateDistributeAll reverts`, async() => {
+        await makeSomeSwapsAndCheckData(10);
+
+        // not ended
+        await expectRevert(
+          seedSwap.estimateDistributedAllData(50, 0),
+          "not ended yet"
+        );
+  
+        await delayToEndTime();
+  
+        // not pause
+        await seedSwap.pause({ from: owner });
+        await expectRevert(
+          seedSwap.estimateDistributedAllData(50, 0),
+          "paused"
+        );
+        await seedSwap.unpause({ from: owner });
+
+        // invalid percentage
+        await expectRevert(
+          seedSwap.estimateDistributedAllData(0, 0),
+          "percentage out of range"
+        );
+        await expectRevert(
+          seedSwap.estimateDistributedAllData(101, 0),
+          "percentage out of range"
+        );
+  
+        // not enough token balance
+        await expectRevert(
+          seedSwap.estimateDistributedAllData(50, 0),
+          "Estimate: not enough token balance"
+        );
+      });
+  
+      it(`Test estimateDistributeBatch`, async() => {
+        let safeNumber = await seedSwap.SAFE_DISTRIBUTE_NUMBER();
+        await makeSomeSwapsAndCheckData(safeNumber * 2);
+        await delayToEndTime();
+        let totalTokenAmount = await seedSwap.totalSwappedToken();
+        await teaToken.transfer(seedSwap.address, totalTokenAmount, { from: owner });
+
+        for(let i = 0; i < 10; i++) {
+          let percentage = Helper.getRandomNumer(1, 100);
+          let batches = [];
+          for(let j = 0; j < swapObjects.length; j++) {
+            if (Helper.getRandomNumer(0, 100) % 2 == 0) {
+              batches.push(j);
+            }
+          }
+          let totalAmounts = new BN(0);
+          let totalUsers = 0;
+          let selectedIds = [];
+          let selectedUsers = [];
+          let selectDAmounts = [];
+          for(let jj = 0; jj < batches.length; jj++) {
+            let j = batches[jj];
+            amount = swapObjects[j].tAmount.sub(swapObjects[j].dAmount).mul(new BN(percentage)).div(new BN(100));
+            if (amount.gt(new BN(0))) {
+              totalUsers += 1;
+              selectedIds.push(j);
+              selectedUsers.push(swapObjects[j].user);
+              selectDAmounts.push(amount);
+              totalAmounts = totalAmounts.add(amount);
+            }
+          }
+          let estData = await seedSwap.estimateDistributedBatchData(percentage, batches);
+          await verifySelectedDistributeData(
+            estData,
+            totalUsers <= safeNumber * 1,
+            totalUsers,
+            totalAmounts,
+            selectedIds,
+            selectedUsers,
+            selectDAmounts
+          );
+
+          // random if should distribute
+          if (Helper.getRandomNumer(0, 100) % 2 == 0) {
+            // distribute and update user data + swap objects
+            await seedSwap.distributeBatch(percentage, batches, { from: admin });
+            for(let j = 0; j < batches.length; j++) {
+              await updateDataAfterDistributed(percentage, batches[j]);
+            }
+          }
+        }
+
+        let batches = [];
+        for(let i = 0; i < swapObjects.length; i++) {
+          batches.push(i);
+        }
+
+        // distribute all and re-check
+        await seedSwap.distributeBatch(100, batches, { from: admin });
+        let estData = await seedSwap.estimateDistributedBatchData(100, batches);
+        await verifySelectedDistributeData(estData, true, 0, 0, [], [], []);
+      });
+  
+      it(`Test estimateDistributeBatch reverts`, async() => {
+        await makeSomeSwapsAndCheckData(2);
+
+        // check revert not ended
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(50, [0], { from: admin }),
+          "not ended yet"
+        );
+
+        // delay to end time
+        await delayToEndTime();
+
+        // check revert when pause
+        await seedSwap.pause({ from: admin });
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(50, [0], { from: admin }),
+          "paused"
+        );
+
+        // unpause
+        await seedSwap.unpause({ from: admin });
+
+        // check percentage is out of range (0 < percentage <= 100)
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(0, [0], { from: admin }),
+          "percentage out of range"
+        );
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(101, [0], { from: admin }),
+          "percentage out of range"
+        );
+
+        // test not enough tea token
+        // withdraw all tea token if any
+        let teaBalance = await teaToken.balanceOf(seedSwap.address);
+        if (teaBalance.gt(new BN(0))) {
+          await seedSwap.emergencyOwnerWithdraw(teaToken.address, teaBalance, { from: owner });
+        }
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(100, [0], { from: admin }),
+          "Estimate: not enough token balance"
+        );
+
+        // transfer enough token to distribute
+        await teaToken.transfer(
+          seedSwap.address,
+          swapObjects[0].tAmount.add(swapObjects[1].tAmount),
+          { from: owner }
+        );
+
+        // check index out of range
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(50, [2], { from: admin }),
+          "Estimate: id out of range"
+        );
+        // check indices are not in order
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(50, [1, 0], { from: admin }),
+          "Estimate: duplicated ids"
+        );
+        await expectRevert(
+          seedSwap.estimateDistributedBatchData(50, [1, 1], { from: admin }),
+          "Estimate: duplicated ids"
+        );
+      });
+    });
+  });
+
+  describe('Test update default values', async () => {
+    let defaultSaleStart = new BN(1609729200);
+    let defaultSaleEnd = new BN(1610384340);
+    let defaultRate = new BN(20000);
+    let defaultRecipient;
+    before('init data and contracts', async () => {
+      deployer = accounts[0];
+      admin = accounts[1];
+      owner = accounts[2];
+      teaToken = await TeaToken.new(admin);
+    });
+
+    beforeEach(`Before each test`, async() => {
+      seedSwap = await SeedSwap.new(owner, teaToken.address, { from: deployer });
+      await seedSwap.updateWhitelistedAdmins([admin], true, { from: owner });
+    });
+
+    it(`Test update sale times`, async() => {
+      Helper.assertEqual(defaultSaleStart, await seedSwap.saleStartTime());
+      Helper.assertEqual(defaultSaleEnd, await seedSwap.saleEndTime());
+
+      // can not update, not owner
+      await expectRevert(
+        seedSwap.updateSaleTimes(defaultSaleStart, defaultSaleEnd, { from: admin }),
+        "Ownable: caller is not the owner"
+      );
+      // can not update start in the past
+      let currentTime = new BN(await Helper.currentBlockTime());
+      await expectRevert(
+        seedSwap.updateSaleTimes(currentTime.sub(new BN(10)), defaultSaleEnd, { from: owner }),
+        "Times: invalid start time"
+      );
+      // start >= end
+      await expectRevert(
+        seedSwap.updateSaleTimes(defaultSaleEnd, defaultSaleEnd, { from: owner }),
+        "Times: invalid start and end time"
+      );
+      // update with event, data changes
+      currentTime = new BN(await Helper.currentBlockTime());
+      let newStartTime = currentTime.add(new BN(100));
+      let newEndTime = currentTime.add(new BN(1000));
+      let tx = await seedSwap.updateSaleTimes(newStartTime, newEndTime, { from: owner });
+      expectEvent(tx, "UpdateSaleTimes", {
+        newStartTime: newStartTime,
+        newEndTime: newEndTime
+      });
+      Helper.assertEqual(newStartTime, await seedSwap.saleStartTime());
+      Helper.assertEqual(newEndTime, await seedSwap.saleEndTime());
+      // delay to start time
+      await Helper.delayChainTime(100);
+      // check can not update after started
+      await expectRevert(
+        seedSwap.updateSaleTimes(defaultSaleStart, defaultSaleEnd, { from: owner }),
+        "already started"
+      );
+    });
+
+    it(`Test update sale rate`, async() => {
+      Helper.assertEqual(defaultRate, await seedSwap.saleRate());
+
+      // can not update, not owner
+      await expectRevert(
+        seedSwap.updateSaleRate(defaultRate, { from: admin }),
+        "Ownable: caller is not the owner"
+      );
+      // check can not update with low rate
+      let newRate = defaultRate.div(new BN(2)).sub(new BN(1));
+      await expectRevert(
+        seedSwap.updateSaleRate(newRate, { from : owner }),
+        "Rates: new rate too low"
+      );
+      // check can not update with high rate
+      newRate = defaultRate.mul(new BN(3)).div(new BN(2)).add(new BN(1));
+      await expectRevert(
+        seedSwap.updateSaleRate(newRate, { from : owner }),
+        "Rates: new rate too high"
+      );
+      // update with lower rate, check event & data changes
+      newRate = defaultRate.div(new BN(2));
+      let tx = await seedSwap.updateSaleRate(newRate, { from: owner });
+      expectEvent(tx, "UpdateSaleRate", {
+        newSaleRate: newRate
+      });
+      Helper.assertEqual(newRate, await seedSwap.saleRate());
+      // update with higher rate, check data changes
+      newRate = newRate.mul(new BN(3)).div(new BN(2));
+      await seedSwap.updateSaleRate(newRate, { from: owner });
+      Helper.assertEqual(newRate, await seedSwap.saleRate());
+      // update sale times, then check can not update rate after ended
+      currentTime = new BN(await Helper.currentBlockTime());
+      let newStartTime = currentTime.add(new BN(20));
+      let newEndTime = currentTime.add(new BN(30));
+      await seedSwap.updateSaleTimes(newStartTime, newEndTime, { from: owner });
+      // delay to end time
+      await Helper.delayChainTime(100);
+      await expectRevert(
+        seedSwap.updateSaleRate(newRate, { from: owner }),
+        "already ended"
+      );
+    });
+
+    it(`Test update recipient`, async() => {
+      defaultRecipient = owner;
+      Helper.assertEqual(defaultRecipient, await seedSwap.ethRecipient());
+
+      // can not update, not owner
+      await expectRevert(
+        seedSwap.updateEthRecipientAddress(defaultRecipient, { from: admin }),
+        "Ownable: caller is not the owner"
+      );
+      // check can not update with zero address
+      await expectRevert(
+        seedSwap.updateEthRecipientAddress(address0, { from : owner }),
+        "Receipient: invalid eth recipient address"
+      );
+      let newRecipient = accounts[6];
+      let tx = await seedSwap.updateEthRecipientAddress(newRecipient, { from: owner });
+      expectEvent(tx, "UpdateEthRecipient", {
+        newRecipient: newRecipient
+      });
+      Helper.assertEqual(newRecipient, await seedSwap.ethRecipient());
+    });
+  });
+
+  describe('Tests ownership, whitelist contract, pause, add/remove whitelists', async () => {
+    before('init data and contracts', async () => {
+      deployer = accounts[0];
+      admin = accounts[1];
+      owner = accounts[2];
+      user = accounts[3];
+      teaToken = await TeaToken.new(owner);
+      seedSwap = await SeedSwap.new(owner, teaToken.address, { from: deployer });
+    });
+
+    it(`Test pause`, async() => {
+      Helper.assertEqual(false, await seedSwap.isPaused());
+      // check only whitelist admin can pause
+      await expectRevert(
+        seedSwap.pause({ from: user}),
+        "WhitelistAdminRole: caller does not have the WhitelistAdmin role"
+      );
+      // check only can unpause when paused
+      await expectRevert(
+        seedSwap.unpause({ from: owner}),
+        "not paused"
+      );
+      // set pause to true
+      await seedSwap.pause({ from: owner });
+      // only can unpause by admin
+      await expectRevert(
+        seedSwap.unpause({ from: user}),
+        "WhitelistAdminRole: caller does not have the WhitelistAdmin role"
+      );
+      // only can pause when it's unpaused
+      await expectRevert(
+        seedSwap.pause({ from: owner}),
+        "paused"
+      );
+      // set back to unpaused
+      await seedSwap.unpause({ from: owner });
+    });
+
+    it(`Test whitelist admin`, async() => {
+      // only owner can add/remove
+      await expectRevert(
+        seedSwap.updateWhitelistedAdmins(
+          [admin],
+          true,
+          { from: user }
+        ),
+        "Ownable: caller is not the owner"
+      );
+      await expectRevert(
+        seedSwap.updateWhitelistedAdmins(
+          [admin],
+          false,
+          { from: user }
+        ),
+        "Ownable: caller is not the owner"
+      );
+      // remove first if already an admin
+      await seedSwap.updateWhitelistedAdmins([admin], false, { from: owner });
+      // add new admin and check data is update
+      await seedSwap.updateWhitelistedAdmins([admin], true, { from: owner });
+      Helper.assertEqual(true, await seedSwap.isWhitelistAdmin(admin));
+      // tx won't revert if add again
+      await seedSwap.updateWhitelistedAdmins([admin], true, { from: owner });
+      Helper.assertEqual(true, await seedSwap.isWhitelistAdmin(admin));
+      // remove admin and check data
+      await seedSwap.updateWhitelistedAdmins([admin], false, { from: owner });
+      Helper.assertEqual(false, await seedSwap.isWhitelistAdmin(admin));
+      // tx won't revert if remove again
+      await seedSwap.updateWhitelistedAdmins([admin, deployer], false, { from: owner });
+      Helper.assertEqual(false, await seedSwap.isWhitelistAdmin(admin));
+    });
+
+    it(`Test whitelist users`, async() => {
+      // add admin if needed
+      if (await seedSwap.isWhitelistAdmin(admin) == false) {
+        await seedSwap.updateWhitelistedAdmins([admin], true, { from: owner });
+      }
+      // only admin can add/remove
+      await expectRevert(
+        seedSwap.updateWhitelistedUsers(
+          [user],
+          true,
+          { from: user }
+        ),
+        "WhitelistAdminRole: caller does not have the WhitelistAdmin role"
+      );
+      await expectRevert(
+        seedSwap.updateWhitelistedUsers(
+          [user],
+          false,
+          { from: user }
+        ),
+        "WhitelistAdminRole: caller does not have the WhitelistAdmin role"
+      );
+      // remove first if already whitelisted
+      await seedSwap.updateWhitelistedUsers([user], false, { from: admin });
+      // add new whitelisted user and check data is update
+      await seedSwap.updateWhitelistedUsers([user], true, { from: admin });
+      Helper.assertEqual(true, await seedSwap.isWhitelisted(user));
+      // tx won't revert if add again
+      await seedSwap.updateWhitelistedUsers([user], true, { from: admin });
+      // remove user and check data
+      await seedSwap.updateWhitelistedUsers([user], false, { from: admin });
+      Helper.assertEqual(false, await seedSwap.isWhitelisted(user));
+      // tx won't revert if remove again
+      await seedSwap.updateWhitelistedUsers([user, deployer], false, { from: admin });
+      Helper.assertEqual(false, await seedSwap.isWhitelisted(user));
+    });
+
+    // no way to transfer eth to contract without reverting
+    it(`Test owner withdraw token`, async() => {
+      let tokenAmount = new BN(10).pow(new BN(10));
+      await teaToken.transfer(seedSwap.address, tokenAmount, { from: owner });
+      ownerBal = await teaToken.balanceOf(owner);
+      await expectRevert(
+        seedSwap.emergencyOwnerWithdraw(teaToken.address, tokenAmount, { from: user }),
+        "Ownable: caller is not the owner"
+      );
+      await seedSwap.emergencyOwnerWithdraw(teaToken.address, tokenAmount, { from: owner, gasPrice: new BN(0) });
+      newOwnerBal = await teaToken.balanceOf(owner);
+      Helper.assertEqual(tokenAmount, newOwnerBal.sub(ownerBal));
+      // call withdraw eth even though there is no way to transfer eth to that contract
+      await expectRevert(
+        seedSwap.emergencyOwnerWithdraw(ethAddress, tokenAmount, { from: user }),
+        "Ownable: caller is not the owner"
+      );
+      let balanceOwner = await Helper.getEthBalance(owner);
+      let balanceContract = await Helper.getEthBalance(seedSwap.address);
+      await seedSwap.emergencyOwnerWithdraw(ethAddress, balanceContract, { from: owner, gasPrice: new BN(0) });
+      Helper.assertEqual(balanceOwner.add(balanceContract), await Helper.getEthBalance(owner));
+      Helper.assertEqual(0, await Helper.getEthBalance(seedSwap.address));
     });
   });
 });

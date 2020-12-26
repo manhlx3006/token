@@ -29,7 +29,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
     uint256 public SAFE_DISTRIBUTE_NUMBER = 150; // safe to distribute to 150 users at once
     uint256 public DISTRIBUTE_PERIOD_UNIT = 1 days;
 
-    IERC20 public saleToken;
+    IERC20  public saleToken;
     uint256 public saleStartTime = 1609729200;  // 10:00:00, 4 Jan 2021 GMT+7
     uint256 public saleEndTime = 1610384340;    // 23:59:00, 11 Jan 2021 GMT+7
     uint256 public saleRate = 20000;            // 1 eth = 20,000 token
@@ -155,8 +155,8 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
     constructor(address payable _owner, IERC20 _token) public {
         require(_token != IERC20(0), "constructor: invalid token");
         // (safe) check timestamp
-        require(block.timestamp < saleStartTime, "constructor: invalid start time");
-        require(saleStartTime < saleEndTime, "constructor: invalid start and end time");
+        assert(block.timestamp < saleStartTime);
+        assert(saleStartTime < saleEndTime);
 
         saleToken = _token;
         ethRecipient = _owner;
@@ -319,6 +319,9 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
     /// in case anything happens
     function emergencyOwnerWithdraw(IERC20 token, uint256 amount) external onlyOwner {
         if (token == ETH_ADDRESS) {
+            // whenever someone transfer eth to this contract
+            // it will either to the swap or revert
+            // so there should be no eth inside the contract
             msg.sender.transfer(amount);
         } else {
             token.safeTransfer(msg.sender, amount);
@@ -402,18 +405,18 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         uint256 units
     )
         external view
+        whenEnded
         whenNotPaused
         onlyValidPercentage(percentage)
         returns(
             bool isSafe,
             uint256 totalUsers,
             uint256 totalDistributingAmount,
-            uint256[] memory ids,
+            uint256[] memory selectedIds,
             address[] memory users,
             uint128[] memory distributingAmounts
         )
     {
-        require(block.timestamp > saleEndTime, "Estimate: sale is not ended");
         // only distribute to orders that before this timestamp
         uint256 timestamp = block.timestamp.sub(units * DISTRIBUTE_PERIOD_UNIT);
 
@@ -426,7 +429,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         }
 
         // return data that will be used to distribute
-        ids = new uint256[](totalUsers);
+        selectedIds = new uint256[](totalUsers);
         users = new address[](totalUsers);
         distributingAmounts = new uint128[](totalUsers);
 
@@ -434,17 +437,17 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         for(uint256 i = 0; i < listSwaps.length; i++) {
             SwapData memory data = listSwaps[i];
             if (listSwaps[i].timestamp > timestamp) break;
-            if (listSwaps[i].tAmount <= listSwaps[i].dAmount) continue;
-            counter += 1;
-            ids[counter] = i;
+            if (listSwaps[i].tAmount == listSwaps[i].dAmount) continue;
+            selectedIds[counter] = i;
             users[counter] = data.user;
             // don't need to use SafeMath here
             distributingAmounts[counter] = (data.tAmount - data.dAmount) * percentage / 100;
             totalDistributingAmount += distributingAmounts[counter];
+            counter += 1;
         }
         require(
             totalDistributingAmount <= saleToken.balanceOf(address(this)),
-            "Estimate: not enought token balance"
+            "Estimate: not enough token balance"
         );
         isSafe = totalUsers <= SAFE_DISTRIBUTE_NUMBER;
     }
@@ -456,6 +459,7 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         uint256[] calldata ids
     )
         external view
+        whenEnded
         whenNotPaused
         onlyValidPercentage(percentage)
         returns(
@@ -467,8 +471,6 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
             uint128[] memory distributingAmounts
         )
     {
-        require(block.timestamp > saleEndTime, "Estimate: sale is not ended");
-
         totalUsers = 0;
         for(uint256 i = 0; i < ids.length; i++) {
             require(ids[i] < listSwaps.length, "Estimate: id out of range");
@@ -484,16 +486,16 @@ contract SeedSwap is ISeedSwap, WhitelistExtension, ReentrancyGuard {
         for(uint256 i = 0; i < ids.length; i++) {
             if (listSwaps[i].tAmount <= listSwaps[i].dAmount) continue;
             SwapData memory data = listSwaps[ids[i]];
-            counter += 1;
             selectedIds[counter] = ids[i];
             users[counter] = data.user;
             // don't need to use SafeMath here
             distributingAmounts[counter] = (data.tAmount - data.dAmount) * percentage / 100;
             totalDistributingAmount += distributingAmounts[counter];
+            counter += 1;
         }
         require(
             totalDistributingAmount <= saleToken.balanceOf(address(this)),
-            "Estimate: not enought token balance"
+            "Estimate: not enough token balance"
         );
         isSafe = totalUsers <= SAFE_DISTRIBUTE_NUMBER;
     }

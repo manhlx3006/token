@@ -34,24 +34,30 @@ contract('TeaToken', accounts => {
       );
     });
 
-    it(`Test transfer`, async() => {
-
-    });
-
-    it(`Test approve`, async() => {
-
-    });
-
-    it(`Test transferFrom`, async() => {
-
-    });
-
     it(`Test burn`, async() => {
-
+      let adminBal = await teaToken.balanceOf(admin);
+      let burntAmount = new BN(10).pow(new BN(19));
+      let totalSupply = await teaToken.totalSupply();
+      await teaToken.burn(burntAmount, { from: admin });
+      let newAdminBal = adminBal.sub(burntAmount);
+      let newTotalSupply = totalSupply.sub(burntAmount);
+      Helper.assertEqual(newAdminBal, await teaToken.balanceOf(admin));
+      Helper.assertEqual(newTotalSupply, await teaToken.totalSupply());
     });
 
     it(`Test burnFrom`, async() => {
-
+      let adminBal = await teaToken.balanceOf(admin);
+      let userBal = await teaToken.balanceOf(user);
+      let totalSupply = await teaToken.totalSupply();
+      let burntAmount = new BN(10).pow(new BN(19));
+      await teaToken.approve(user, burntAmount, { from: admin });
+      await teaToken.burnFrom(admin, burntAmount, { from: user });
+      let newAdminBal = adminBal.sub(burntAmount);
+      let newTotalSupply = totalSupply.sub(burntAmount);
+      Helper.assertEqual(newAdminBal, await teaToken.balanceOf(admin));
+      Helper.assertEqual(newTotalSupply, await teaToken.totalSupply());
+      // user's balance is not changed
+      Helper.assertEqual(userBal, await teaToken.balanceOf(user));
     });
   });
 });

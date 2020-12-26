@@ -16,7 +16,7 @@ We use `yarn` as the package manager. You may use `npm` and `npx` instead, but c
 
 
 ## Compilation with Buidler
-`yarn compile` to compile contracts for all solidity versions.
+`yarn compile` to compile contracts for all solidity versions or `./compile.sh`
 
 
 ## Contract Deployment / Interactions
@@ -29,16 +29,16 @@ INFURA_API_KEY=********************************
 ```
 
 ## Testing with Buidler
-1. If contracts have not been compiled, run `yarn compile`. This step can be skipped subsequently.
-2. Run `yarn test`
-3. Use `./tst.sh -f` for running a specific test file.
+1. If contracts have not been compiled, run `yarn compile` or `./compile.sh`. This step can be skipped subsequently.
+2. Run `yarn test` or `./test.sh`
+3. Use `./test.sh -f` for running a specific test file.
 
 ### Example Commands
 - `yarn test` (Runs all tests)
-- `./tst.sh -f ./test/xxx.js`
+- `./test.sh -f ./tests/xxx.js`
 
 ### Example
-`yarn buidler test --no-compile ./test/xxx.js`
+`yarn hardhat test --no-compile ./test/xxx.js`
 
 ### Coverage with `buidler-coverage`
-- Run `yarn coverage` for coverage on files
+- Run `./coverage.sh` for coverage on files
